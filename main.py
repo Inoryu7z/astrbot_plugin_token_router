@@ -193,8 +193,10 @@ class TokenRouterPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM请求前: 设置配置中指定的模型名。"""
         umo = event.unified_msg_origin
+        logger.info(f"Token路由: on_llm_request 触发, UMO={umo}")
         window_config = self._find_window_config(umo)
         if not window_config:
+            logger.debug(f"Token路由: UMO {umo} 未找到窗口配置")
             return
 
         provider_id = self._get_current_provider_id(umo)
@@ -213,8 +215,10 @@ class TokenRouterPlugin(Star):
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM响应后: 记录token用量，达到限额时切换模型。"""
         umo = event.unified_msg_origin
+        logger.info(f"Token路由: on_llm_response 触发, UMO={umo}")
         window_config = self._find_window_config(umo)
         if not window_config:
+            logger.info(f"Token路由: UMO {umo} 未找到窗口配置(on_llm_response)")
             return
 
         # 今天所有模型已用尽，不再处理
