@@ -30,7 +30,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "AstrBot WebUI中配置的提供商ID（用于切换provider）"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
                   },
                   "model_name": {
                     "type": "string",
@@ -70,7 +70,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "AstrBot WebUI中配置的提供商ID"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
                   },
                   "model_name": {
                     "type": "string",
@@ -110,7 +110,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "AstrBot WebUI中配置的提供商ID"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
                   },
                   "model_name": {
                     "type": "string",
@@ -150,7 +150,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "AstrBot WebUI中配置的提供商ID"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
                   },
                   "model_name": {
                     "type": "string",
@@ -190,7 +190,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "AstrBot WebUI中配置的提供商ID"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
                   },
                   "model_name": {
                     "type": "string",

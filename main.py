@@ -45,6 +45,13 @@ class TokenRouterPlugin(Star):
         self._load_usage_data()
         logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}")
 
+        # 列出所有可用的 provider ID，方便用户配置
+        available_providers = self._get_available_provider_ids()
+        if available_providers:
+            logger.info(
+                f"Token路由: 可用的 provider ID: {', '.join(available_providers)}"
+            )
+
     # ========== 数据持久化 ==========
 
     def _load_usage_data(self):
@@ -182,6 +189,13 @@ class TokenRouterPlugin(Star):
         return -1
 
     # ========== Provider操作 ==========
+
+    def _get_available_provider_ids(self) -> list[str]:
+        """获取所有可用的 provider ID 列表。"""
+        try:
+            return list(self.context.provider_manager.inst_map.keys())
+        except Exception:
+            return []
 
     def _get_current_provider_id(self, umo: str) -> str | None:
         """获取某UMO当前使用的provider ID。"""
