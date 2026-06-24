@@ -161,6 +161,26 @@ class TokenRouterPlugin(Star):
                 return window
         return None
 
+    # ========== 路由链解析 ==========
+
+    def _get_active_model_index(self, umo: str, models: list) -> int:
+        """获取当前应使用的模型在路由链中的索引。
+
+        从第一个模型开始，跳过已达到限额的模型，返回第一个未达限额的模型索引。
+        如果所有模型都已达限额，返回 -1。
+        """
+        for i, model in enumerate(models):
+            if not isinstance(model, dict):
+                continue
+            provider_id = model.get("provider_id", "")
+            daily_limit = model.get("daily_limit", 200000)
+            if not provider_id:
+                continue
+            today_usage = self._get_today_usage(umo, provider_id)
+            if today_usage < daily_limit:
+                return i
+        return -1
+
     # ========== Provider操作 ==========
 
     def _get_current_provider_id(self, umo: str) -> str | None:
@@ -191,34 +211,72 @@ class TokenRouterPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """LLM请求前: 设置配置中指定的模型名。"""
+        """LLM请求前: 切换到路由链中当前应使用的provider和模型。"""
         umo = event.unified_msg_origin
-        logger.info(f"Token路由: on_llm_request 触发, UMO={umo}")
         window_config = self._find_window_config(umo)
         if not window_config:
-            logger.debug(f"Token路由: UMO {umo} 未找到窗口配置")
-            return
-
-        provider_id = self._get_current_provider_id(umo)
-        if not provider_id:
             return
 
         models = window_config.get("models", [])
-        for model in models:
-            if isinstance(model, dict) and model.get("provider_id") == provider_id:
-                model_name = model.get("model_name", "")
-                if model_name:
-                    req.model = model_name
-                break
+        if not models:
+            return
+
+        # 如果今天所有模型已用尽，不干预（让框架用默认provider）
+        if self._is_all_exhausted(umo):
+            return
+
+        # 找到路由链中当前应使用的模型
+        active_index = self._get_active_model_index(umo, models)
+        if active_index == -1:
+            # 所有模型都达到限额，回退到框架默认
+            self._set_all_exhausted(umo)
+            default_provider_id = self._get_default_provider_id()
+            current_provider_id = self._get_current_provider_id(umo)
+            if default_provider_id and default_provider_id != current_provider_id:
+                try:
+                    await self.context.provider_manager.set_provider(
+                        default_provider_id,
+                        ProviderType.CHAT_COMPLETION,
+                        umo,
+                    )
+                    logger.info(
+                        f"Token路由: UMO {umo} 所有模型已达限额(请求前检测)，"
+                        f"回退到框架默认模型 {default_provider_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Token路由: 回退到默认模型失败: {e}")
+            return
+
+        active_model = models[active_index]
+        target_provider_id = active_model.get("provider_id", "")
+        target_model_name = active_model.get("model_name", "")
+
+        # 切换provider
+        current_provider_id = self._get_current_provider_id(umo)
+        if target_provider_id and target_provider_id != current_provider_id:
+            try:
+                await self.context.provider_manager.set_provider(
+                    target_provider_id,
+                    ProviderType.CHAT_COMPLETION,
+                    umo,
+                )
+                logger.info(
+                    f"Token路由: UMO {umo} 切换provider "
+                    f"{current_provider_id} -> {target_provider_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Token路由: 切换provider失败: {e}")
+
+        # 设置模型名
+        if target_model_name:
+            req.model = target_model_name
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM响应后: 记录token用量，达到限额时切换模型。"""
         umo = event.unified_msg_origin
-        logger.info(f"Token路由: on_llm_response 触发, UMO={umo}")
         window_config = self._find_window_config(umo)
         if not window_config:
-            logger.info(f"Token路由: UMO {umo} 未找到窗口配置(on_llm_response)")
             return
 
         # 今天所有模型已用尽，不再处理
@@ -233,6 +291,11 @@ class TokenRouterPlugin(Star):
         if resp.usage:
             usage = resp.usage.total
             self._record_usage(umo, provider_id, usage)
+            logger.info(
+                f"Token路由: UMO {umo} provider {provider_id} "
+                f"本次 {usage} token，"
+                f"今日累计 {self._get_today_usage(umo, provider_id)}"
+            )
 
         # 查找当前provider在配置中的位置
         models = window_config.get("models", [])
@@ -251,10 +314,23 @@ class TokenRouterPlugin(Star):
         today_usage = self._get_today_usage(umo, provider_id)
 
         if today_usage >= daily_limit:
-            if current_index + 1 < len(models):
+            # 查找下一个未达限额的模型
+            next_index = -1
+            for i in range(current_index + 1, len(models)):
+                next_model = models[i]
+                if not isinstance(next_model, dict):
+                    continue
+                next_pid = next_model.get("provider_id", "")
+                next_limit = next_model.get("daily_limit", 200000)
+                if next_pid and self._get_today_usage(umo, next_pid) < next_limit:
+                    next_index = i
+                    break
+
+            if next_index != -1:
                 # 切换到下一个模型
-                next_model = models[current_index + 1]
+                next_model = models[next_index]
                 next_provider_id = next_model.get("provider_id")
+                next_model_name = next_model.get("model_name", "")
                 if next_provider_id:
                     try:
                         await self.context.provider_manager.set_provider(
@@ -267,6 +343,7 @@ class TokenRouterPlugin(Star):
                             f"{provider_id} 用量 {today_usage}/{daily_limit}"
                             f"{'(全局)' if self.stats_mode == 'global' else ''}，"
                             f"已切换到 {next_provider_id}"
+                            f"({next_model_name})"
                         )
                     except Exception as e:
                         logger.warning(f"Token路由: 切换到下一个模型失败: {e}")
