@@ -4,6 +4,10 @@ astrbot_plugin_token_router - Token用量追踪与模型路由插件
 追踪每个对话窗口(UMO)的token用量，当某个模型的每日用量达到限额时，
 自动切换到路由链中的下一个模型。当所有模型都达到限额时，回退到框架默认模型。
 每天0点(本地时间)自动重置用量计数。
+
+支持两种统计模式：
+- window: 每个窗口独立计数，互不影响
+- global: 所有窗口共享同一provider的用量计数，任一窗口的请求都会累加
 """
 
 import json
@@ -33,35 +37,37 @@ class TokenRouterPlugin(Star):
         self.config = config or {}
         self.data_dir = Path(str(StarTools.get_data_dir()))
         self.usage_file = self.data_dir / "usage_data.json"
-        # 数据结构:
-        # {
-        #   "umo_string": {
-        #     "provider_id_1": {"date": "2026-06-24", "usage": 150000},
-        #     "provider_id_2": {"date": "2026-06-24", "usage": 50000},
-        #     "_exhausted": "2026-06-24"
-        #   }
-        # }
-        self.token_usage: dict = self._load_usage_data()
-        logger.info("Token路由插件已加载")
+        self.stats_mode = self.config.get("stats_mode", "window")
+        # 窗口模式: {umo: {provider_id: {date, usage}, _exhausted: date}}
+        self.token_usage: dict = {}
+        # 全局模式: {provider_id: {date, usage}}
+        self.global_usage: dict = {}
+        self._load_usage_data()
+        logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}")
 
     # ========== 数据持久化 ==========
 
-    def _load_usage_data(self) -> dict:
+    def _load_usage_data(self):
         """从文件加载token用量数据。"""
         if self.usage_file.exists():
             try:
                 with open(self.usage_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                self.token_usage = data.get("window_usage", {})
+                self.global_usage = data.get("global_usage", {})
             except Exception as e:
                 logger.warning(f"Token路由: 加载用量数据失败: {e}")
-        return {}
 
     def _save_usage_data(self):
         """保存token用量数据到文件。"""
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            data = {
+                "window_usage": self.token_usage,
+                "global_usage": self.global_usage,
+            }
             with open(self.usage_file, "w", encoding="utf-8") as f:
-                json.dump(self.token_usage, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Token路由: 保存用量数据失败: {e}")
 
@@ -72,10 +78,19 @@ class TokenRouterPlugin(Star):
         return datetime.datetime.now().strftime("%Y-%m-%d")
 
     def _check_and_reset_daily(self, umo: str, provider_id: str):
-        """检查日期是否变更，如果变更则重置该provider的用量。"""
+        """检查日期是否变更，如果变更则重置该窗口该provider的用量。"""
         today = self._get_today_str()
         if umo in self.token_usage and provider_id in self.token_usage[umo]:
             entry = self.token_usage[umo][provider_id]
+            if isinstance(entry, dict) and entry.get("date") != today:
+                entry["date"] = today
+                entry["usage"] = 0
+
+    def _check_and_reset_global(self, provider_id: str):
+        """检查日期是否变更，如果变更则重置该provider的全局用量。"""
+        today = self._get_today_str()
+        if provider_id in self.global_usage:
+            entry = self.global_usage[provider_id]
             if isinstance(entry, dict) and entry.get("date") != today:
                 entry["date"] = today
                 entry["usage"] = 0
@@ -100,33 +115,48 @@ class TokenRouterPlugin(Star):
     # ========== 用量记录 ==========
 
     def _record_usage(self, umo: str, provider_id: str, tokens: int):
-        """记录token用量。"""
+        """记录token用量。根据统计模式写入不同位置。"""
         today = self._get_today_str()
-        if umo not in self.token_usage:
-            self.token_usage[umo] = {}
-        if provider_id not in self.token_usage[umo]:
-            self.token_usage[umo][provider_id] = {"date": today, "usage": 0}
-        self._check_and_reset_daily(umo, provider_id)
-        self.token_usage[umo][provider_id]["usage"] += tokens
+        if self.stats_mode == "global":
+            if provider_id not in self.global_usage:
+                self.global_usage[provider_id] = {"date": today, "usage": 0}
+            self._check_and_reset_global(provider_id)
+            self.global_usage[provider_id]["usage"] += tokens
+        else:
+            if umo not in self.token_usage:
+                self.token_usage[umo] = {}
+            if provider_id not in self.token_usage[umo]:
+                self.token_usage[umo][provider_id] = {"date": today, "usage": 0}
+            self._check_and_reset_daily(umo, provider_id)
+            self.token_usage[umo][provider_id]["usage"] += tokens
         self._save_usage_data()
 
     def _get_today_usage(self, umo: str, provider_id: str) -> int:
-        """获取某UMO某provider今天的token用量。"""
-        self._check_and_reset_daily(umo, provider_id)
-        if umo in self.token_usage and provider_id in self.token_usage[umo]:
-            entry = self.token_usage[umo][provider_id]
-            if isinstance(entry, dict):
-                return entry.get("usage", 0)
-        return 0
+        """获取某provider今天的token用量。根据统计模式读取不同位置。"""
+        if self.stats_mode == "global":
+            self._check_and_reset_global(provider_id)
+            if provider_id in self.global_usage:
+                entry = self.global_usage[provider_id]
+                if isinstance(entry, dict):
+                    return entry.get("usage", 0)
+            return 0
+        else:
+            self._check_and_reset_daily(umo, provider_id)
+            if umo in self.token_usage and provider_id in self.token_usage[umo]:
+                entry = self.token_usage[umo][provider_id]
+                if isinstance(entry, dict):
+                    return entry.get("usage", 0)
+            return 0
 
     # ========== 配置查找 ==========
 
     def _find_window_config(self, umo: str) -> dict | None:
-        """根据UMO查找窗口配置。"""
-        windows = self.config.get("windows", [])
-        if not windows:
+        """根据UMO查找窗口配置。遍历所有窗口。"""
+        windows_config = self.config.get("windows", {})
+        if not isinstance(windows_config, dict):
             return None
-        for window in windows:
+        for i in range(1, 6):
+            window = windows_config.get(f"window_{i}", {})
             if isinstance(window, dict) and window.get("umo") == umo:
                 return window
         return None
@@ -230,7 +260,8 @@ class TokenRouterPlugin(Star):
                         )
                         logger.info(
                             f"Token路由: UMO {umo} 的模型 "
-                            f"{provider_id} 用量 {today_usage}/{daily_limit}，"
+                            f"{provider_id} 用量 {today_usage}/{daily_limit}"
+                            f"{'(全局)' if self.stats_mode == 'global' else ''}，"
                             f"已切换到 {next_provider_id}"
                         )
                     except Exception as e:

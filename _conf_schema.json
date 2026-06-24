@@ -1,16 +1,23 @@
 {
+  "stats_mode": {
+    "type": "string",
+    "description": "统计模式",
+    "hint": "window=窗口统计(每个窗口独立计数)；global=全局统计(所有窗口共享同一provider的用量计数)",
+    "default": "window"
+  },
   "windows": {
-    "type": "template_list",
-    "description": "对话窗口配置",
-    "hint": "每个条目对应一个对话窗口(UMO)，可自由添加/删除。",
-    "templates": {
-      "window": {
-        "name": "窗口",
+    "type": "object",
+    "description": "窗口配置",
+    "hint": "每个窗口对应一个对话窗口(UMO)。UMO留空的窗口不会生效。",
+    "items": {
+      "window_1": {
+        "type": "object",
+        "description": "窗口 1",
         "items": {
           "umo": {
             "type": "string",
             "description": "对话窗口UMO号",
-            "hint": "格式: platform_id:message_type:session_id，例如 aiocqhttp:GroupMessage:123456"
+            "hint": "格式: platform_id:message_type:session_id，例如 aiocqhttp:GroupMessage:123456。留空则不启用此窗口。"
           },
           "models": {
             "type": "template_list",
@@ -42,8 +49,167 @@
             "default": []
           }
         }
+      },
+      "window_2": {
+        "type": "object",
+        "description": "窗口 2",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "AstrBot WebUI中配置的提供商ID"
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "description": "模型名称",
+                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_3": {
+        "type": "object",
+        "description": "窗口 3",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "AstrBot WebUI中配置的提供商ID"
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "description": "模型名称",
+                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_4": {
+        "type": "object",
+        "description": "窗口 4",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "AstrBot WebUI中配置的提供商ID"
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "description": "模型名称",
+                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_5": {
+        "type": "object",
+        "description": "窗口 5",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "AstrBot WebUI中配置的提供商ID"
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "description": "模型名称",
+                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
       }
-    },
-    "default": []
+    }
   }
 }
