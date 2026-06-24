@@ -30,12 +30,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
-                  },
-                  "model_name": {
-                    "type": "string",
-                    "description": "模型名称",
-                    "hint": "如 gpt-4o, claude-3-5-sonnet（用于设置请求的model字段）"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
                   },
                   "daily_limit": {
                     "type": "int",
@@ -70,12 +65,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
-                  },
-                  "model_name": {
-                    "type": "string",
-                    "description": "模型名称",
-                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
                   },
                   "daily_limit": {
                     "type": "int",
@@ -110,12 +100,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
-                  },
-                  "model_name": {
-                    "type": "string",
-                    "description": "模型名称",
-                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
                   },
                   "daily_limit": {
                     "type": "int",
@@ -150,12 +135,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
-                  },
-                  "model_name": {
-                    "type": "string",
-                    "description": "模型名称",
-                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
                   },
                   "daily_limit": {
                     "type": "int",
@@ -190,12 +170,7 @@
                   "provider_id": {
                     "type": "string",
                     "description": "Provider ID",
-                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215。插件加载时日志会列出所有可用ID。"
-                  },
-                  "model_name": {
-                    "type": "string",
-                    "description": "模型名称",
-                    "hint": "如 gpt-4o, claude-3-5-sonnet"
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
                   },
                   "daily_limit": {
                     "type": "int",
