@@ -266,12 +266,12 @@ class TokenRouterPlugin(Star):
             except Exception as e:
                 logger.warning(f"Token路由: 切换provider失败: {e}")
 
-    @filter.AdapterMessageEvent()
-    async def on_message(self, event: AstrMessageEvent):
-        """消息到达时: 在LLM请求之前提前切换provider。
+    @filter.on_waiting_llm_request()
+    async def on_waiting_llm(self, event: AstrMessageEvent):
+        """等待LLM请求时: 在provider选择之前提前切换。
 
         on_llm_request钩子在provider已解析后才触发，此时切换对当前请求无效。
-        因此在消息到达阶段提前设置session偏好，确保build_main_agent时读到正确的provider。
+        on_waiting_llm_request在provider选择之前触发，此时set_provider能生效。
         """
         umo = event.unified_msg_origin
         window_config = self._find_window_config(umo)
@@ -304,11 +304,11 @@ class TokenRouterPlugin(Star):
                     umo,
                 )
                 logger.info(
-                    f"Token路由: UMO {umo} 提前切换provider "
+                    f"Token路由: UMO {umo} 切换provider "
                     f"{current_provider_id} -> {target_provider_id}"
                 )
             except Exception as e:
-                logger.warning(f"Token路由: 提前切换provider失败: {e}")
+                logger.warning(f"Token路由: 切换provider失败: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
