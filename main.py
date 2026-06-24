@@ -193,13 +193,22 @@ class TokenRouterPlugin(Star):
 
     # ========== 事件钩子 ==========
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def on_message(self, event: AstrMessageEvent):
         """消息到达时: 通过event.set_extra指定provider，供框架_select_provider读取。
 
         使用框架原生的selected_provider机制，不干扰其他插件和系统命令。
         只在消息确定要调用LLM时才生效（_select_provider会检查此extra）。
         """
+        # 跳过非唤醒消息
+        if not event.is_at_or_wake_command:
+            return
+
+        # 跳过已匹配的命令（如 /reset, /help 等）
+        handlers_parsed_params = event.get_extra("handlers_parsed_params", {})
+        if handlers_parsed_params:
+            return
+
         umo = event.unified_msg_origin
         window_config = self._find_window_config(umo)
         if not window_config:
