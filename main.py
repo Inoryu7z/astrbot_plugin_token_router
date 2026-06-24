@@ -211,7 +211,7 @@ class TokenRouterPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """LLM请求前: 切换到路由链中当前应使用的provider。"""
+        """LLM请求前: 确认provider已切换（兜底）。"""
         umo = event.unified_msg_origin
         window_config = self._find_window_config(umo)
         if not window_config:
@@ -250,7 +250,7 @@ class TokenRouterPlugin(Star):
         active_model = models[active_index]
         target_provider_id = active_model.get("provider_id", "")
 
-        # 切换provider
+        # 兜底：如果provider还没切过来，再切一次
         current_provider_id = self._get_current_provider_id(umo)
         if target_provider_id and target_provider_id != current_provider_id:
             try:
@@ -265,6 +265,50 @@ class TokenRouterPlugin(Star):
                 )
             except Exception as e:
                 logger.warning(f"Token路由: 切换provider失败: {e}")
+
+    @filter.AdapterMessageEvent()
+    async def on_message(self, event: AstrMessageEvent):
+        """消息到达时: 在LLM请求之前提前切换provider。
+
+        on_llm_request钩子在provider已解析后才触发，此时切换对当前请求无效。
+        因此在消息到达阶段提前设置session偏好，确保build_main_agent时读到正确的provider。
+        """
+        umo = event.unified_msg_origin
+        window_config = self._find_window_config(umo)
+        if not window_config:
+            return
+
+        models = window_config.get("models", [])
+        if not models:
+            return
+
+        if self._is_all_exhausted(umo):
+            return
+
+        active_index = self._get_active_model_index(umo, models)
+        if active_index == -1:
+            return
+
+        active_model = models[active_index]
+        target_provider_id = active_model.get("provider_id", "")
+        if not target_provider_id:
+            return
+
+        # 提前切换provider，让后续的_select_provider读到正确的偏好
+        current_provider_id = self._get_current_provider_id(umo)
+        if target_provider_id != current_provider_id:
+            try:
+                await self.context.provider_manager.set_provider(
+                    target_provider_id,
+                    ProviderType.CHAT_COMPLETION,
+                    umo,
+                )
+                logger.info(
+                    f"Token路由: UMO {umo} 提前切换provider "
+                    f"{current_provider_id} -> {target_provider_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Token路由: 提前切换provider失败: {e}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
