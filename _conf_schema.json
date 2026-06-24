@@ -1,0 +1,49 @@
+{
+  "windows": {
+    "type": "template_list",
+    "description": "对话窗口配置",
+    "hint": "每个条目对应一个对话窗口(UMO)，可自由添加/删除。",
+    "templates": {
+      "window": {
+        "name": "窗口",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id，例如 aiocqhttp:GroupMessage:123456"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。当模型1达到限额后切换到模型2，以此类推。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "AstrBot WebUI中配置的提供商ID（用于切换provider）"
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "description": "模型名称",
+                    "hint": "如 gpt-4o, claude-3-5-sonnet（用于设置请求的model字段）"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      }
+    },
+    "default": []
+  }
+}
