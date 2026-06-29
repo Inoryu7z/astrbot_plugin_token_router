@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
-    "1.2.0",
+    "1.3.0",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -41,13 +41,14 @@ class TokenRouterPlugin(Star):
         self.data_dir = Path(str(StarTools.get_data_dir()))
         self.usage_file = self.data_dir / "usage_data.json"
         self.stats_mode = self.config.get("stats_mode", "window")
+        self.debug = bool(self.config.get("debug", False))
         # 窗口模式: {umo: {persona_scope: {provider_id: {date, usage}, _exhausted: date}}}
         # persona_scope 为人格ID字符串，空字符串表示未指定人格(兼容旧配置)
         self.token_usage: dict = {}
         # 全局模式: {provider_id: {date, usage}}
         self.global_usage: dict = {}
         self._load_usage_data()
-        logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}")
+        logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}，调试模式: {'开启' if self.debug else '关闭'}")
 
     # ========== 数据持久化 ==========
 
@@ -325,6 +326,12 @@ class TokenRouterPlugin(Star):
         # 通过框架原生机制指定provider
         event.set_extra("selected_provider", target_provider_id)
 
+        if self.debug:
+            persona_tag = f"/人格 {persona_id}" if persona_id else ""
+            logger.info(
+                f"Token路由[DEBUG]: UMO {umo}{persona_tag} 本次使用模型 {target_provider_id}"
+            )
+
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM响应后: 记录token用量，标记耗尽状态。
@@ -364,7 +371,16 @@ class TokenRouterPlugin(Star):
         # 记录token用量
         if resp.usage:
             usage = resp.usage.total
+            before = self._get_today_usage(umo, persona_id, provider_id)
             self._record_usage(umo, persona_id, provider_id, usage)
+            if self.debug:
+                after = self._get_today_usage(umo, persona_id, provider_id)
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                scope_tag = "(全局)" if self.stats_mode == "global" else ""
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 模型 {provider_id} "
+                    f"用量 {before} → {after} (+{usage}){scope_tag}"
+                )
 
         # 检查是否达到限额
         current_model = models[current_index]
@@ -395,6 +411,11 @@ class TokenRouterPlugin(Star):
                         f"{'(全局)' if self.stats_mode == 'global' else ''}，"
                         f"下次请求将自动切换到 {next_provider_id}"
                     )
+                    if self.debug:
+                        logger.info(
+                            f"Token路由[DEBUG]: UMO {umo}{persona_tag} 模型切换 "
+                            f"{provider_id} → {next_provider_id}"
+                        )
             else:
                 # 所有模型已用尽，标记为耗尽状态
                 self._set_all_exhausted(umo, persona_id)

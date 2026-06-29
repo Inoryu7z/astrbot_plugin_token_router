@@ -5,6 +5,12 @@
     "hint": "window=窗口统计(每个窗口独立计数)；global=全局统计(所有窗口共享同一provider的用量计数)",
     "default": "window"
   },
+  "debug": {
+    "type": "bool",
+    "description": "调试模式",
+    "hint": "开启后输出详细日志：每次用量累加(before→after)、模型切换(A→B)。默认关闭。仅用于排查问题，长期使用会增加日志量。",
+    "default": false
+  },
   "windows": {
     "type": "object",
     "description": "窗口配置",

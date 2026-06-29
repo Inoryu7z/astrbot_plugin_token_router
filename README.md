@@ -76,6 +76,7 @@ v1.2.0 起，`persona_id` 在配置面板中为下拉选择列表，选项由框
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `stats_mode` | 统计模式：`window`（窗口统计）/ `global`（全局统计） | `window` |
+| `debug` | 调试模式。开启后输出详细日志：用量累加(before→after)、模型切换(A→B)、本次使用模型。默认关闭。 | `false` |
 
 ### 窗口配置（window_1 ~ window_10）
 
@@ -156,6 +157,24 @@ windows
 - 如果某窗口不需要路由，UMO 留空即可，插件不会干预未配置的窗口。
 - 全局统计模式下，不同窗口如果配置了同一个 provider，会共享用量计数；但各窗口的路由链和切换目标仍然独立。
 - 人格独立路由下，每个人格的用量计数与「已用尽」标记独立，互不影响。
+
+---
+
+## 🐛 调试模式
+
+开启 `debug` 配置项后，插件会输出详细的路由日志，便于排查问题。日志格式：
+
+```
+Token路由[DEBUG]: UMO aiocqhttp:GroupMessage:123456 本次使用模型 provider_a
+Token路由[DEBUG]: UMO aiocqhttp:GroupMessage:123456 模型 provider_a 用量 50000 → 55000 (+5000)
+Token路由[DEBUG]: UMO aiocqhttp:GroupMessage:123456/人格 bot_a 模型切换 provider_a → provider_b
+```
+
+* **本次使用模型**：`on_message` 指定 provider 时输出，反映本次请求将使用的模型。
+* **用量累加**：`on_llm_response` 记录用量后输出，格式 `before → after (+delta)`，反映当天该模型的 token 用量因本次回复由多少变为多少。全局统计模式下末尾标注 `(全局)`。
+* **模型切换**：触发切换时输出简明的 `A → B` 格式，与原有的"用量 X/Y，下次切换到 B"日志互补。
+
+调试模式仅增加日志输出，不影响路由逻辑。长期使用会增加日志量，建议排查完问题后关闭。
 
 ---
 
