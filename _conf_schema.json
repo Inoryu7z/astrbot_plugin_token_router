@@ -8,7 +8,7 @@
   "windows": {
     "type": "object",
     "description": "窗口配置",
-    "hint": "每个窗口对应一个对话窗口(UMO)。UMO留空的窗口不会生效。",
+    "hint": "每个窗口对应一个对话窗口(UMO)。UMO留空的窗口不会生效。同一UMO可配置多个窗口(搭配不同人格ID)实现多人格各自独立路由。",
     "items": {
       "window_1": {
         "type": "object",
@@ -18,6 +18,11 @@
             "type": "string",
             "description": "对话窗口UMO号",
             "hint": "格式: platform_id:message_type:session_id，例如 aiocqhttp:GroupMessage:123456。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格ID",
+            "hint": "留空则对此窗口的所有人格生效(向后兼容)。填写人格名称则仅对该人格生效，可实现同一窗口内多人格各自独立路由。"
           },
           "models": {
             "type": "template_list",
@@ -54,6 +59,11 @@
             "description": "对话窗口UMO号",
             "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
           },
+          "persona_id": {
+            "type": "string",
+            "description": "人格ID",
+            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+          },
           "models": {
             "type": "template_list",
             "description": "模型路由列表",
@@ -88,6 +98,11 @@
             "type": "string",
             "description": "对话窗口UMO号",
             "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格ID",
+            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
           },
           "models": {
             "type": "template_list",
@@ -124,6 +139,11 @@
             "description": "对话窗口UMO号",
             "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
           },
+          "persona_id": {
+            "type": "string",
+            "description": "人格ID",
+            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+          },
           "models": {
             "type": "template_list",
             "description": "模型路由列表",
@@ -158,6 +178,11 @@
             "type": "string",
             "description": "对话窗口UMO号",
             "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格ID",
+            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
           },
           "models": {
             "type": "template_list",

@@ -8,6 +8,9 @@ astrbot_plugin_token_router - Token用量追踪与模型路由插件
 支持两种统计模式：
 - window: 每个窗口独立计数，互不影响
 - global: 所有窗口共享同一provider的用量计数，任一窗口的请求都会累加
+
+v1.1.0 新增：基于人格(persona)的路由。同一UMO下可配置多个窗口，
+每个窗口绑定不同人格ID，实现多人格各自独立的路由链与用量计数。
 """
 
 import json
@@ -24,8 +27,8 @@ from astrbot.core.star.star_tools import StarTools
 @register(
     "astrbot_plugin_token_router",
     "Inoryu7z",
-    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。",
-    "1.0.0",
+    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
+    "1.1.0",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -38,7 +41,8 @@ class TokenRouterPlugin(Star):
         self.data_dir = Path(str(StarTools.get_data_dir()))
         self.usage_file = self.data_dir / "usage_data.json"
         self.stats_mode = self.config.get("stats_mode", "window")
-        # 窗口模式: {umo: {provider_id: {date, usage}, _exhausted: date}}
+        # 窗口模式: {umo: {persona_scope: {provider_id: {date, usage}, _exhausted: date}}}
+        # persona_scope 为人格ID字符串，空字符串表示未指定人格(兼容旧配置)
         self.token_usage: dict = {}
         # 全局模式: {provider_id: {date, usage}}
         self.global_usage: dict = {}
@@ -54,8 +58,29 @@ class TokenRouterPlugin(Star):
                     data = json.load(f)
                 self.token_usage = data.get("window_usage", {})
                 self.global_usage = data.get("global_usage", {})
+                self._migrate_usage_data()
             except Exception as e:
                 logger.warning(f"Token路由: 加载用量数据失败: {e}")
+
+    def _migrate_usage_data(self):
+        """将旧版扁平格式迁移到人格感知的嵌套格式。
+
+        旧格式: token_usage[umo][provider_id] = {date, usage}
+                token_usage[umo]["_exhausted"] = date
+        新格式: token_usage[umo][""][provider_id] = {date, usage}
+                token_usage[umo][""]["_exhausted"] = date
+        """
+        for umo, data in list(self.token_usage.items()):
+            if not isinstance(data, dict):
+                continue
+            # 旧格式特征: 顶层存在 _exhausted 或 provider 条目(含 date/usage)
+            is_old = "_exhausted" in data or any(
+                isinstance(v, dict) and "date" in v and "usage" in v
+                for v in data.values()
+            )
+            if is_old:
+                self.token_usage[umo] = {"": data}
+                logger.info(f"Token路由: 已迁移 UMO {umo} 的旧版用量数据到人格嵌套格式")
 
     def _save_usage_data(self):
         try:
@@ -74,12 +99,14 @@ class TokenRouterPlugin(Star):
     def _get_today_str(self) -> str:
         return datetime.datetime.now().strftime("%Y-%m-%d")
 
-    def _check_and_reset_daily(self, umo: str, provider_id: str):
-        today = self._get_today_str()
-        if umo in self.token_usage and provider_id in self.token_usage[umo]:
-            entry = self.token_usage[umo][provider_id]
-            if isinstance(entry, dict) and entry.get("date") != today:
-                entry["date"] = today
+    def _check_and_reset_daily(self, umo: str, persona_id: str | None, provider_id: str):
+        scope = self._peek_window_scope(umo, persona_id)
+        if not scope:
+            return
+        if provider_id in scope:
+            entry = scope[provider_id]
+            if isinstance(entry, dict) and entry.get("date") != self._get_today_str():
+                entry["date"] = self._get_today_str()
                 entry["usage"] = 0
 
     def _check_and_reset_global(self, provider_id: str):
@@ -90,24 +117,21 @@ class TokenRouterPlugin(Star):
                 entry["date"] = today
                 entry["usage"] = 0
 
-    def _is_all_exhausted(self, umo: str) -> bool:
+    def _is_all_exhausted(self, umo: str, persona_id: str | None) -> bool:
         today = self._get_today_str()
-        if umo in self.token_usage:
-            exhausted_date = self.token_usage[umo].get("_exhausted")
-            if exhausted_date == today:
-                return True
+        scope = self._peek_window_scope(umo, persona_id)
+        if scope and scope.get("_exhausted") == today:
+            return True
         return False
 
-    def _set_all_exhausted(self, umo: str):
-        today = self._get_today_str()
-        if umo not in self.token_usage:
-            self.token_usage[umo] = {}
-        self.token_usage[umo]["_exhausted"] = today
+    def _set_all_exhausted(self, umo: str, persona_id: str | None):
+        scope = self._get_window_scope(umo, persona_id)
+        scope["_exhausted"] = self._get_today_str()
         self._save_usage_data()
 
     # ========== 用量记录 ==========
 
-    def _record_usage(self, umo: str, provider_id: str, tokens: int):
+    def _record_usage(self, umo: str, persona_id: str | None, provider_id: str, tokens: int):
         today = self._get_today_str()
         if self.stats_mode == "global":
             if provider_id not in self.global_usage:
@@ -115,15 +139,14 @@ class TokenRouterPlugin(Star):
             self._check_and_reset_global(provider_id)
             self.global_usage[provider_id]["usage"] += tokens
         else:
-            if umo not in self.token_usage:
-                self.token_usage[umo] = {}
-            if provider_id not in self.token_usage[umo]:
-                self.token_usage[umo][provider_id] = {"date": today, "usage": 0}
-            self._check_and_reset_daily(umo, provider_id)
-            self.token_usage[umo][provider_id]["usage"] += tokens
+            scope = self._get_window_scope(umo, persona_id)
+            if provider_id not in scope:
+                scope[provider_id] = {"date": today, "usage": 0}
+            self._check_and_reset_daily(umo, persona_id, provider_id)
+            scope[provider_id]["usage"] += tokens
         self._save_usage_data()
 
-    def _get_today_usage(self, umo: str, provider_id: str) -> int:
+    def _get_today_usage(self, umo: str, persona_id: str | None, provider_id: str) -> int:
         if self.stats_mode == "global":
             self._check_and_reset_global(provider_id)
             if provider_id in self.global_usage:
@@ -132,28 +155,68 @@ class TokenRouterPlugin(Star):
                     return entry.get("usage", 0)
             return 0
         else:
-            self._check_and_reset_daily(umo, provider_id)
-            if umo in self.token_usage and provider_id in self.token_usage[umo]:
-                entry = self.token_usage[umo][provider_id]
+            self._check_and_reset_daily(umo, persona_id, provider_id)
+            scope = self._peek_window_scope(umo, persona_id)
+            if scope and provider_id in scope:
+                entry = scope[provider_id]
                 if isinstance(entry, dict):
                     return entry.get("usage", 0)
             return 0
 
+    # ========== 窗口作用域辅助 ==========
+
+    def _get_window_scope(self, umo: str, persona_id: str | None) -> dict:
+        """获取或创建 (umo, persona_id) 对应的用量作用域。"""
+        if umo not in self.token_usage:
+            self.token_usage[umo] = {}
+        scope_key = persona_id or ""
+        if scope_key not in self.token_usage[umo]:
+            self.token_usage[umo][scope_key] = {}
+        return self.token_usage[umo][scope_key]
+
+    def _peek_window_scope(self, umo: str, persona_id: str | None) -> dict | None:
+        """获取 (umo, persona_id) 对应的用量作用域，不创建。"""
+        scope_key = persona_id or ""
+        return self.token_usage.get(umo, {}).get(scope_key)
+
     # ========== 配置查找 ==========
 
-    def _find_window_config(self, umo: str) -> dict | None:
+    def _find_window_config(self, umo: str, persona_id: str | None) -> dict | None:
+        """查找匹配 (UMO, persona_id) 的窗口配置。
+
+        匹配优先级:
+        1. UMO + 人格ID 完全匹配(人格ID非空时)
+        2. UMO + 空人格ID(通用窗口，对所有人格生效)
+        """
         windows_config = self.config.get("windows", {})
         if not isinstance(windows_config, dict):
             return None
+
+        umo_matches: list[dict] = []
         for i in range(1, 6):
             window = windows_config.get(f"window_{i}", {})
             if isinstance(window, dict) and window.get("umo") == umo:
+                umo_matches.append(window)
+
+        if not umo_matches:
+            return None
+
+        # 人格ID非空时，优先匹配指定人格的窗口
+        if persona_id:
+            for window in umo_matches:
+                if window.get("persona_id", "") == persona_id:
+                    return window
+
+        # 回退到通用窗口(未配置人格ID)
+        for window in umo_matches:
+            if not window.get("persona_id", ""):
                 return window
+
         return None
 
     # ========== 路由链解析 ==========
 
-    def _get_active_model_index(self, umo: str, models: list) -> int:
+    def _get_active_model_index(self, umo: str, persona_id: str | None, models: list) -> int:
         """获取当前应使用的模型在路由链中的索引。"""
         for i, model in enumerate(models):
             if not isinstance(model, dict):
@@ -162,7 +225,7 @@ class TokenRouterPlugin(Star):
             daily_limit = model.get("daily_limit", 200000)
             if not provider_id:
                 continue
-            today_usage = self._get_today_usage(umo, provider_id)
+            today_usage = self._get_today_usage(umo, persona_id, provider_id)
             if today_usage < daily_limit:
                 return i
         return -1
@@ -180,16 +243,39 @@ class TokenRouterPlugin(Star):
             pass
         return None
 
-    def _get_default_provider_id(self) -> str | None:
+    # ========== 人格解析 ==========
+
+    async def _get_current_persona_id(self, event: AstrMessageEvent) -> str | None:
+        """获取当前事件最终生效的人格ID。
+
+        复用框架 PersonaManager.resolve_selected_persona 的完整解析逻辑:
+        UMO级强制人格 > 会话级人格 > 默认人格。
+        """
         try:
-            provider = self.context.provider_manager.get_using_provider(
-                ProviderType.CHAT_COMPLETION, None
+            umo = event.unified_msg_origin
+            conversation_persona_id = None
+            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+            if curr_cid:
+                conversation = await self.context.conversation_manager.get_conversation(umo, curr_cid)
+                if conversation:
+                    conversation_persona_id = conversation.persona_id
+
+            cfg = self.context.get_config(umo)
+            provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+
+            persona_id, _, _, _ = await self.context.persona_manager.resolve_selected_persona(
+                umo=umo,
+                conversation_persona_id=conversation_persona_id,
+                platform_name=event.get_platform_name(),
+                provider_settings=provider_settings,
             )
-            if provider:
-                return provider.provider_config.get("id")
-        except Exception:
-            pass
-        return None
+            # "[%None]" 表示人格被显式禁用
+            if persona_id == "[%None]":
+                return None
+            return persona_id
+        except Exception as e:
+            logger.warning(f"Token路由: 获取人格ID失败: {e}")
+            return None
 
     # ========== 事件钩子 ==========
 
@@ -210,7 +296,8 @@ class TokenRouterPlugin(Star):
             return
 
         umo = event.unified_msg_origin
-        window_config = self._find_window_config(umo)
+        persona_id = await self._get_current_persona_id(event)
+        window_config = self._find_window_config(umo, persona_id)
         if not window_config:
             return
 
@@ -218,10 +305,10 @@ class TokenRouterPlugin(Star):
         if not models:
             return
 
-        if self._is_all_exhausted(umo):
+        if self._is_all_exhausted(umo, persona_id):
             return
 
-        active_index = self._get_active_model_index(umo, models)
+        active_index = self._get_active_model_index(umo, persona_id, models)
         if active_index == -1:
             return
 
@@ -235,13 +322,19 @@ class TokenRouterPlugin(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """LLM响应后: 记录token用量，达到限额时为下次请求设置新provider。"""
+        """LLM响应后: 记录token用量，标记耗尽状态。
+
+        注意：不调用 set_provider() 改变会话 provider。
+        路由逻辑完全由 on_message 中的 selected_provider 机制处理，
+        每条消息独立决定使用的 provider，不与系统指令/其他插件冲突。
+        """
         umo = event.unified_msg_origin
-        window_config = self._find_window_config(umo)
+        persona_id = await self._get_current_persona_id(event)
+        window_config = self._find_window_config(umo, persona_id)
         if not window_config:
             return
 
-        if self._is_all_exhausted(umo):
+        if self._is_all_exhausted(umo, persona_id):
             return
 
         # 优先从event extra获取本次实际使用的provider
@@ -254,7 +347,7 @@ class TokenRouterPlugin(Star):
         # 记录token用量
         if resp.usage:
             usage = resp.usage.total
-            self._record_usage(umo, provider_id, usage)
+            self._record_usage(umo, persona_id, provider_id, usage)
 
         # 查找当前provider在配置中的位置
         models = window_config.get("models", [])
@@ -270,7 +363,7 @@ class TokenRouterPlugin(Star):
         # 检查是否达到限额
         current_model = models[current_index]
         daily_limit = current_model.get("daily_limit", 200000)
-        today_usage = self._get_today_usage(umo, provider_id)
+        today_usage = self._get_today_usage(umo, persona_id, provider_id)
 
         if today_usage >= daily_limit:
             # 查找下一个未达限额的模型
@@ -281,50 +374,29 @@ class TokenRouterPlugin(Star):
                     continue
                 next_pid = next_model.get("provider_id", "")
                 next_limit = next_model.get("daily_limit", 200000)
-                if next_pid and self._get_today_usage(umo, next_pid) < next_limit:
+                if next_pid and self._get_today_usage(umo, persona_id, next_pid) < next_limit:
                     next_index = i
                     break
 
             if next_index != -1:
                 next_provider_id = models[next_index].get("provider_id")
                 if next_provider_id:
-                    # 通过set_provider设置session偏好，下次消息生效
-                    try:
-                        await self.context.provider_manager.set_provider(
-                            next_provider_id,
-                            ProviderType.CHAT_COMPLETION,
-                            umo,
-                        )
-                        logger.info(
-                            f"Token路由: UMO {umo} 的模型 "
-                            f"{provider_id} 用量 {today_usage}/{daily_limit}"
-                            f"{'(全局)' if self.stats_mode == 'global' else ''}，"
-                            f"已切换到 {next_provider_id}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Token路由: 切换到下一个模型失败: {e}")
-            else:
-                # 所有模型已用尽
-                self._set_all_exhausted(umo)
-                default_provider_id = self._get_default_provider_id()
-                if default_provider_id and default_provider_id != provider_id:
-                    try:
-                        await self.context.provider_manager.set_provider(
-                            default_provider_id,
-                            ProviderType.CHAT_COMPLETION,
-                            umo,
-                        )
-                        logger.info(
-                            f"Token路由: UMO {umo} 的所有模型已用尽，"
-                            f"回退到框架默认模型 {default_provider_id}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Token路由: 回退到默认模型失败: {e}")
-                else:
+                    # 不调用 set_provider，由下次 on_message 的 selected_provider 机制接管
+                    persona_tag = f"/人格 {persona_id}" if persona_id else ""
                     logger.info(
-                        f"Token路由: UMO {umo} 的所有模型已用尽，"
-                        f"默认模型与当前相同，保持不变"
+                        f"Token路由: UMO {umo}{persona_tag} 的模型 "
+                        f"{provider_id} 用量 {today_usage}/{daily_limit}"
+                        f"{'(全局)' if self.stats_mode == 'global' else ''}，"
+                        f"下次请求将自动切换到 {next_provider_id}"
                     )
+            else:
+                # 所有模型已用尽，标记为耗尽状态
+                self._set_all_exhausted(umo, persona_id)
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                logger.info(
+                    f"Token路由: UMO {umo}{persona_tag} 的所有模型已用尽，"
+                    f"后续请求将回退到框架默认模型"
+                )
 
     async def terminate(self):
         self._save_usage_data()
