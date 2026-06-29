@@ -103,10 +103,15 @@ class TokenRouterPlugin(Star):
         scope = self._peek_window_scope(umo, persona_id)
         if not scope:
             return
+        today = self._get_today_str()
+        # 清除过期的 _exhausted 标记，避免数据冗余
+        exhausted = scope.get("_exhausted")
+        if exhausted and exhausted != today:
+            scope.pop("_exhausted", None)
         if provider_id in scope:
             entry = scope[provider_id]
-            if isinstance(entry, dict) and entry.get("date") != self._get_today_str():
-                entry["date"] = self._get_today_str()
+            if isinstance(entry, dict) and entry.get("date") != today:
+                entry["date"] = today
                 entry["usage"] = 0
 
     def _check_and_reset_global(self, provider_id: str):
@@ -204,12 +209,12 @@ class TokenRouterPlugin(Star):
         # 人格ID非空时，优先匹配指定人格的窗口
         if persona_id:
             for window in umo_matches:
-                if window.get("persona_id", "") == persona_id:
+                if (window.get("persona_id") or "") == persona_id:
                     return window
 
         # 回退到通用窗口(未配置人格ID)
         for window in umo_matches:
-            if not window.get("persona_id", ""):
+            if not (window.get("persona_id") or ""):
                 return window
 
         return None
@@ -344,11 +349,6 @@ class TokenRouterPlugin(Star):
         if not provider_id:
             return
 
-        # 记录token用量
-        if resp.usage:
-            usage = resp.usage.total
-            self._record_usage(umo, persona_id, provider_id, usage)
-
         # 查找当前provider在配置中的位置
         models = window_config.get("models", [])
         current_index = -1
@@ -357,8 +357,14 @@ class TokenRouterPlugin(Star):
                 current_index = i
                 break
 
+        # provider 不在路由链中时不记录用量，避免数据冗余
         if current_index == -1:
             return
+
+        # 记录token用量
+        if resp.usage:
+            usage = resp.usage.total
+            self._record_usage(umo, persona_id, provider_id, usage)
 
         # 检查是否达到限额
         current_model = models[current_index]
