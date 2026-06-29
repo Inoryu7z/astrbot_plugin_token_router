@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
-    "1.1.0",
+    "1.2.0",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -198,7 +198,7 @@ class TokenRouterPlugin(Star):
             return None
 
         umo_matches: list[dict] = []
-        for i in range(1, 6):
+        for i in range(1, 11):
             window = windows_config.get(f"window_{i}", {})
             if isinstance(window, dict) and window.get("umo") == umo:
                 umo_matches.append(window)

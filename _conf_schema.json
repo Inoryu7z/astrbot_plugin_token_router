@@ -8,7 +8,7 @@
   "windows": {
     "type": "object",
     "description": "窗口配置",
-    "hint": "每个窗口对应一个对话窗口(UMO)。UMO留空的窗口不会生效。同一UMO可配置多个窗口(搭配不同人格ID)实现多人格各自独立路由。",
+    "hint": "每个窗口对应一个对话窗口(UMO)。UMO留空的窗口不会生效。同一UMO可配置多个窗口(搭配不同人格)实现多人格各自独立路由。共提供10个窗口槽位。",
     "items": {
       "window_1": {
         "type": "object",
@@ -21,8 +21,10 @@
           },
           "persona_id": {
             "type": "string",
-            "description": "人格ID",
-            "hint": "留空则对此窗口的所有人格生效(向后兼容)。填写人格名称则仅对该人格生效，可实现同一窗口内多人格各自独立路由。"
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效(向后兼容)；选择某个具体人格则仅对该人格生效，可实现同一窗口内多人格各自独立路由。",
+            "default": "",
+            "_special": "select_persona"
           },
           "models": {
             "type": "template_list",
@@ -61,8 +63,10 @@
           },
           "persona_id": {
             "type": "string",
-            "description": "人格ID",
-            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
           },
           "models": {
             "type": "template_list",
@@ -101,8 +105,10 @@
           },
           "persona_id": {
             "type": "string",
-            "description": "人格ID",
-            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
           },
           "models": {
             "type": "template_list",
@@ -141,8 +147,10 @@
           },
           "persona_id": {
             "type": "string",
-            "description": "人格ID",
-            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
           },
           "models": {
             "type": "template_list",
@@ -181,8 +189,220 @@
           },
           "persona_id": {
             "type": "string",
-            "description": "人格ID",
-            "hint": "留空则对此窗口的所有人格生效。填写人格名称则仅对该人格生效。"
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_6": {
+        "type": "object",
+        "description": "窗口 6",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_7": {
+        "type": "object",
+        "description": "窗口 7",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_8": {
+        "type": "object",
+        "description": "窗口 8",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_9": {
+        "type": "object",
+        "description": "窗口 9",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
+          },
+          "models": {
+            "type": "template_list",
+            "description": "模型路由列表",
+            "hint": "按顺序配置模型路由链。模型1应与框架默认模型一致。",
+            "templates": {
+              "model": {
+                "name": "模型",
+                "items": {
+                  "provider_id": {
+                    "type": "string",
+                    "description": "Provider ID",
+                    "hint": "格式: 提供商源ID/模型名，如 火山/doubao-seed-2-0-pro-260215"
+                  },
+                  "daily_limit": {
+                    "type": "int",
+                    "description": "每日用量限额(token)",
+                    "hint": "达到此限额后切换到下一个模型",
+                    "default": 200000
+                  }
+                }
+              }
+            },
+            "default": []
+          }
+        }
+      },
+      "window_10": {
+        "type": "object",
+        "description": "窗口 10",
+        "items": {
+          "umo": {
+            "type": "string",
+            "description": "对话窗口UMO号",
+            "hint": "格式: platform_id:message_type:session_id。留空则不启用此窗口。"
+          },
+          "persona_id": {
+            "type": "string",
+            "description": "人格",
+            "hint": "从下拉列表中选择人格。留空则对此窗口的所有人格生效；选择某个具体人格则仅对该人格生效。",
+            "default": "",
+            "_special": "select_persona"
           },
           "models": {
             "type": "template_list",
