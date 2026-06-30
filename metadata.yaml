@@ -1,6 +1,6 @@
 name: astrbot_plugin_token_router
 display_name: Token路由器
 desc: "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。"
-version: 1.3.1
+version: 1.3.2
 author: Inoryu7z
 repo: https://github.com/Inoryu7z/-astrbot_plugin_token_router

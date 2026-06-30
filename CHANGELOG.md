@@ -1,3 +1,18 @@
+### v1.3.2
+
+**🐛 修复：群聊读空气场景下的路由失效**
+
+**问题背景**：v1.3.1 的 `on_message` 会检查 `is_at_or_wake_command`，仅在被@/唤醒词/私聊时设置 `selected_provider`。但 chatplus 等插件的"读空气"机制会在非@消息上触发 LLM 调用，此时 `selected_provider` 未被设置，回退到框架默认 provider（可能已暂停），导致 503 疯狂重试和 fallback 到低质量模型。
+
+**典型场景**：多 bot 共享同一个 astrbot 后端时，用户@botA，但 botB 的 napcat 也会收到消息（`is_at_or_wake_command=False`）。chatplus 读空气让 botB 也回复，但 token_router 跳过了 botB 的路由设置，导致 botB 走默认 provider。
+
+**改进**：
+* 移除 `is_at_or_wake_command` 检查，改为"UMO 快速过滤"：先检查 UMO 是否在任何窗口配置中，不在则直接 return（避免对无关消息执行 persona 解析的开销）。
+* UMO 匹配窗口配置时，无论是否被@，都预先设置 `selected_provider`。如果最终未触发 LLM 调用（chatplus 决定不回复），`selected_provider` 不会被消费，无副作用。
+* 保留 `handlers_parsed_params` 检查（指令不路由）。
+
+---
+
 ### v1.3.1
 
 **🔍 调试模式增强：全 return 点诊断日志**

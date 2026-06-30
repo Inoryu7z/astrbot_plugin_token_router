@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
-    "1.3.1",
+    "1.3.2",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -291,16 +291,23 @@ class TokenRouterPlugin(Star):
 
         使用框架原生的selected_provider机制，不干扰其他插件和系统命令。
         只在消息确定要调用LLM时才生效（_select_provider会检查此extra）。
+
+        v1.3.2: 移除is_at_or_wake_command检查。chatplus等插件的"读空气"机制
+        会在非@消息上触发LLM调用，此时也需要预先设置selected_provider，
+        否则会回退到框架默认provider（可能已暂停），导致503重试和fallback。
         """
         umo = event.unified_msg_origin
 
-        # 跳过非唤醒消息
-        if not event.is_at_or_wake_command:
-            if self.debug:
-                logger.info(
-                    f"Token路由[DEBUG]: UMO {umo} 跳过：非唤醒消息(is_at_or_wake_command=False)"
-                )
-            return
+        # 快速过滤：UMO不在任何窗口配置中，无需路由（避免对无关消息执行persona解析）
+        windows_config = self.config.get("windows", {})
+        if isinstance(windows_config, dict):
+            umo_in_any = any(
+                isinstance(windows_config.get(f"window_{i}", {}), dict)
+                and windows_config.get(f"window_{i}", {}).get("umo") == umo
+                for i in range(1, 11)
+            )
+            if not umo_in_any:
+                return
 
         # 跳过已匹配的命令（如 /reset, /help 等）
         handlers_parsed_params = event.get_extra("handlers_parsed_params", {})
