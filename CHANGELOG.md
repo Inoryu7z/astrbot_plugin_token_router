@@ -1,3 +1,17 @@
+### v1.3.1
+
+**🔍 调试模式增强：全 return 点诊断日志**
+
+**问题背景**：v1.3.0 的 debug 模式仅在路由成功时输出日志，当 \on_message\ / \on_llm_response\ 在某个 return 点静默退出时无法定位原因，导致群聊不生效等问题难以排查。
+
+**改进**：在 \on_message\ 和 \on_llm_response\ 的所有 return 点添加 debug 日志，开启 debug 后可一眼定位消息被跳过的具体原因：
+
+* \on_message\ 7 个 return 点：非唤醒消息、匹配到指令、未匹配到窗口配置(含人格解析结果)、未配置模型路由链、所有模型已用尽、无可用模型、模型未配置 provider_id。
+* \on_llm_response\ 4 个 return 点：未匹配到窗口配置、无法获取 provider_id(selected_provider 为空且会话 provider 解析失败)、provider 不在路由链中(输出已配置的 provider 列表)。
+* 人格解析失败时输出实际解析结果(空/未解析)，便于发现 persona_id 配置不匹配的问题。
+
+---
+
 ### v1.3.0
 
 **🐛 新增：调试模式(debug)**

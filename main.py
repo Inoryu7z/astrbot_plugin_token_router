@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
-    "1.3.0",
+    "1.3.1",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -292,35 +292,67 @@ class TokenRouterPlugin(Star):
         使用框架原生的selected_provider机制，不干扰其他插件和系统命令。
         只在消息确定要调用LLM时才生效（_select_provider会检查此extra）。
         """
+        umo = event.unified_msg_origin
+
         # 跳过非唤醒消息
         if not event.is_at_or_wake_command:
+            if self.debug:
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo} 跳过：非唤醒消息(is_at_or_wake_command=False)"
+                )
             return
 
         # 跳过已匹配的命令（如 /reset, /help 等）
         handlers_parsed_params = event.get_extra("handlers_parsed_params", {})
         if handlers_parsed_params:
+            if self.debug:
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo} 跳过：匹配到指令 {list(handlers_parsed_params.keys())}"
+                )
             return
 
-        umo = event.unified_msg_origin
         persona_id = await self._get_current_persona_id(event)
         window_config = self._find_window_config(umo, persona_id)
         if not window_config:
+            if self.debug:
+                persona_desc = persona_id if persona_id else "(空/未解析)"
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo} 跳过：未匹配到窗口配置(人格={persona_desc})"
+                )
             return
 
         models = window_config.get("models", [])
         if not models:
+            if self.debug:
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo} 跳过：窗口未配置模型路由链"
+                )
             return
 
         if self._is_all_exhausted(umo, persona_id):
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 跳过：所有模型今日已用尽"
+                )
             return
 
         active_index = self._get_active_model_index(umo, persona_id, models)
         if active_index == -1:
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 跳过：无可用模型(active_index=-1)"
+                )
             return
 
         active_model = models[active_index]
         target_provider_id = active_model.get("provider_id", "")
         if not target_provider_id:
+            if self.debug:
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo} 跳过：模型#{active_index}未配置provider_id"
+                )
             return
 
         # 通过框架原生机制指定provider
@@ -344,6 +376,11 @@ class TokenRouterPlugin(Star):
         persona_id = await self._get_current_persona_id(event)
         window_config = self._find_window_config(umo, persona_id)
         if not window_config:
+            if self.debug:
+                persona_desc = persona_id if persona_id else "(空/未解析)"
+                logger.info(
+                    f"Token路由[DEBUG]: on_llm_response UMO {umo} 跳过：未匹配到窗口配置(人格={persona_desc})"
+                )
             return
 
         if self._is_all_exhausted(umo, persona_id):
@@ -354,6 +391,11 @@ class TokenRouterPlugin(Star):
         if not provider_id:
             provider_id = self._get_current_provider_id(umo)
         if not provider_id:
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                logger.info(
+                    f"Token路由[DEBUG]: on_llm_response UMO {umo}{persona_tag} 跳过：无法获取provider_id(selected_provider为空且会话provider解析失败)"
+                )
             return
 
         # 查找当前provider在配置中的位置
@@ -366,6 +408,12 @@ class TokenRouterPlugin(Star):
 
         # provider 不在路由链中时不记录用量，避免数据冗余
         if current_index == -1:
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                configured = [m.get("provider_id") for m in models if isinstance(m, dict)]
+                logger.info(
+                    f"Token路由[DEBUG]: on_llm_response UMO {umo}{persona_tag} 跳过：provider {provider_id} 不在路由链中(已配置: {configured})"
+                )
             return
 
         # 记录token用量
