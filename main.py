@@ -27,8 +27,8 @@ from astrbot.core.star.star_tools import StarTools
 @register(
     "astrbot_plugin_token_router",
     "Inoryu7z",
-    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。",
-    "1.3.2",
+    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
+    "1.3.3",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -47,6 +47,9 @@ class TokenRouterPlugin(Star):
         self.token_usage: dict = {}
         # 全局模式: {provider_id: {date, usage}}
         self.global_usage: dict = {}
+        # 手动禁用状态: {umo: {persona_scope_key: True}}
+        # 被 /路由 命令关闭的 (UMO, 人格) 对，插件暂停介入这些窗口
+        self.disabled_windows: dict = {}
         self._load_usage_data()
         logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}，调试模式: {'开启' if self.debug else '关闭'}")
 
@@ -59,6 +62,7 @@ class TokenRouterPlugin(Star):
                     data = json.load(f)
                 self.token_usage = data.get("window_usage", {})
                 self.global_usage = data.get("global_usage", {})
+                self.disabled_windows = data.get("disabled_windows", {})
                 self._migrate_usage_data()
             except Exception as e:
                 logger.warning(f"Token路由: 加载用量数据失败: {e}")
@@ -89,6 +93,7 @@ class TokenRouterPlugin(Star):
             data = {
                 "window_usage": self.token_usage,
                 "global_usage": self.global_usage,
+                "disabled_windows": self.disabled_windows,
             }
             with open(self.usage_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -185,14 +190,41 @@ class TokenRouterPlugin(Star):
         scope_key = persona_id or ""
         return self.token_usage.get(umo, {}).get(scope_key)
 
+    # ========== 手动禁用状态 ==========
+
+    def _is_disabled(self, umo: str, persona_id: str | None) -> bool:
+        """检查 (UMO, persona_id) 是否被 /路由 命令手动禁用。"""
+        scope_key = persona_id or ""
+        return self.disabled_windows.get(umo, {}).get(scope_key, False) is True
+
+    def _toggle_disabled(self, umo: str, persona_id: str | None) -> bool:
+        """切换 (UMO, persona_id) 的禁用状态，返回新状态(True=已禁用)。"""
+        scope_key = persona_id or ""
+        if umo not in self.disabled_windows:
+            self.disabled_windows[umo] = {}
+        currently_disabled = self.disabled_windows[umo].get(scope_key, False) is True
+        if currently_disabled:
+            self.disabled_windows[umo].pop(scope_key, None)
+            if not self.disabled_windows[umo]:
+                self.disabled_windows.pop(umo, None)
+            new_state = False
+        else:
+            self.disabled_windows[umo][scope_key] = True
+            new_state = True
+        self._save_usage_data()
+        return new_state
+
     # ========== 配置查找 ==========
 
-    def _find_window_config(self, umo: str, persona_id: str | None) -> dict | None:
+    def _find_window_config(self, umo: str, persona_id: str | None, allow_fallback: bool = True) -> dict | None:
         """查找匹配 (UMO, persona_id) 的窗口配置。
 
         匹配优先级:
         1. UMO + 人格ID 完全匹配(人格ID非空时)
-        2. UMO + 空人格ID(通用窗口，对所有人格生效)
+        2. UMO + 空人格ID(通用窗口，对所有人格生效) - 仅当 allow_fallback=True
+
+        allow_fallback=False 时仅匹配显式注册了该人格ID的窗口，
+        用于 /路由 命令判断当前人格是否已在插件中注册。
         """
         windows_config = self.config.get("windows", {})
         if not isinstance(windows_config, dict):
@@ -214,9 +246,10 @@ class TokenRouterPlugin(Star):
                     return window
 
         # 回退到通用窗口(未配置人格ID)
-        for window in umo_matches:
-            if not (window.get("persona_id") or ""):
-                return window
+        if allow_fallback:
+            for window in umo_matches:
+                if not (window.get("persona_id") or ""):
+                    return window
 
         return None
 
@@ -283,6 +316,42 @@ class TokenRouterPlugin(Star):
             logger.warning(f"Token路由: 获取人格ID失败: {e}")
             return None
 
+    # ========== 命令处理 ==========
+
+    @filter.command("路由")
+    async def toggle_router(self, event: AstrMessageEvent):
+        """切换当前窗口(UMO+人格)的Token路由启用状态。
+
+        仅对已在插件中显式注册了该人格(配置了对应 persona_id 窗口)的窗口生效，
+        不回退到通用窗口(空 persona_id)。
+        关闭后插件暂停介入该窗口，使用 astrbot 默认链路；再次使用可恢复。
+        """
+        umo = event.unified_msg_origin
+        persona_id = await self._get_current_persona_id(event)
+
+        # 仅允许对已显式注册该人格的窗口使用本命令(不回退到通用窗口)
+        window_config = self._find_window_config(umo, persona_id, allow_fallback=False)
+        if not window_config:
+            persona_desc = persona_id if persona_id else "(未解析到人格)"
+            yield event.plain_result(
+                f"Token路由: 当前窗口(UMO={umo}, 人格={persona_desc})未在插件中注册专属路由配置，"
+                f"无法使用 /路由 命令。请在配置中为该UMO+人格添加窗口后再使用。"
+            )
+            return
+
+        new_state = self._toggle_disabled(umo, persona_id)
+        persona_tag = persona_id if persona_id else "(通用)"
+        if new_state:
+            yield event.plain_result(
+                f"Token路由: 已关闭 UMO={umo} 人格={persona_tag} 的路由介入，"
+                f"本插件暂停介入此窗口，将使用astrbot默认链路。"
+            )
+        else:
+            yield event.plain_result(
+                f"Token路由: 已开启 UMO={umo} 人格={persona_tag} 的路由介入，"
+                f"将按配置的路由链切换模型。"
+            )
+
     # ========== 事件钩子 ==========
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
@@ -325,6 +394,14 @@ class TokenRouterPlugin(Star):
                 persona_desc = persona_id if persona_id else "(空/未解析)"
                 logger.info(
                     f"Token路由[DEBUG]: UMO {umo} 跳过：未匹配到窗口配置(人格={persona_desc})"
+                )
+            return
+
+        if self._is_disabled(umo, persona_id):
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 跳过：已被 /路由 命令手动关闭"
                 )
             return
 
@@ -388,6 +465,9 @@ class TokenRouterPlugin(Star):
                 logger.info(
                     f"Token路由[DEBUG]: on_llm_response UMO {umo} 跳过：未匹配到窗口配置(人格={persona_desc})"
                 )
+            return
+
+        if self._is_disabled(umo, persona_id):
             return
 
         if self._is_all_exhausted(umo, persona_id):
