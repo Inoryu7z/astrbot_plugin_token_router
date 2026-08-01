@@ -2,7 +2,8 @@
 
 **🔌 新增：存图模型用量追踪接口**
 
-* 新增 `get_active_storage_provider` / `record_storage_usage` / `get_storage_usage` 方法，供 wardrobe 等插件跨插件调用，实现存图模型按日用量路由。
+* 新增 `get_active_storage_provider(providers)` / `record_storage_usage` / `get_storage_usage` 方法，供 wardrobe 等插件跨插件调用，实现存图模型按日用量路由。
+* `get_active_storage_provider` 接受 providers 列表（含 id + daily_limit），支持 N 级回退链：按顺序找第一个未达限额的，全部达限额返回最后一个。
 * 存图模型用量按 provider_id 独立追踪，每日 0 点自动重置，持久化到 `usage_data.json`。
 
 ---

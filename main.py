@@ -255,58 +255,47 @@ class TokenRouterPlugin(Star):
                 f"{self.storage_usage[provider_id]['usage']} (+{tokens})"
             )
 
-    def get_active_storage_provider(
-        self,
-        primary_id: str,
-        secondary_id: str,
-        primary_limit: int,
-        secondary_limit: int,
-    ) -> str:
-        """根据当日用量决定存图应使用哪个模型。
+    def get_active_storage_provider(self, providers: list[dict]) -> str:
+        """根据当日用量决定存图应使用哪个模型（支持 N 级回退链）。
 
         逻辑：
-        - 主模型用量 < 主限额 → 返回主模型
-        - 主模型用量 ≥ 主限额 → 返回副模型
-        - 副模型用量 ≥ 副限额 → 仍返回副模型（不二次路由，仅日志告警）
-        - 无副模型 → 返回主模型（即使超限也继续用）
+        - 按列表顺序找第一个未达限额的 provider（limit<=0 表示不限制）
+        - 全部达限额 → 返回列表最后一个（不二次路由，仅日志告警）
 
         Args:
-            primary_id: 存图主模型 provider_id
-            secondary_id: 存图副模型 provider_id（可为空）
-            primary_limit: 主模型日限额（token）
-            secondary_limit: 副模型日限额（token）
+            providers: [{"id": "xxx", "daily_limit": 1500000}, ...]
+                       按列表顺序组成回退链，至少1个
 
         Returns:
             应使用的 provider_id
         """
-        if not primary_id:
-            return secondary_id or primary_id
+        if not providers:
+            return ""
 
-        primary_usage = self.get_storage_usage(primary_id)
-        if primary_limit <= 0 or primary_usage < primary_limit:
-            return primary_id
+        for i, p in enumerate(providers):
+            pid = p.get("id", "")
+            limit = int(p.get("daily_limit", 0) or 0)
+            if not pid:
+                continue
+            if limit <= 0:
+                return pid
+            usage = self.get_storage_usage(pid)
+            if usage < limit:
+                return pid
+            logger.info(
+                f"Token路由: 存图模型 {pid} 用量 {usage}/{limit}，"
+                f"切换到下一个提供商"
+            )
 
-        # 主模型已达限额
-        if secondary_id:
-            secondary_usage = self.get_storage_usage(secondary_id)
-            if secondary_limit > 0 and secondary_usage >= secondary_limit:
-                logger.info(
-                    f"Token路由: 存图副模型 {secondary_id} 已达限额 "
-                    f"{secondary_usage}/{secondary_limit}，继续使用副模型（不二次路由）"
-                )
-            else:
-                logger.info(
-                    f"Token路由: 存图主模型 {primary_id} 用量 {primary_usage}/{primary_limit}，"
-                    f"切换到副模型 {secondary_id}"
-                )
-            return secondary_id
-
-        # 无副模型，继续用主模型
+        # 全部达限额，返回最后一个
+        last = providers[-1].get("id", "")
+        last_limit = int(providers[-1].get("daily_limit", 0) or 0)
+        last_usage = self.get_storage_usage(last) if last else 0
         logger.info(
-            f"Token路由: 存图主模型 {primary_id} 用量 {primary_usage}/{primary_limit}，"
-            f"未配置副模型，继续使用主模型"
+            f"Token路由: 存图模型全部达限额，继续使用最后一个 {last} "
+            f"({last_usage}/{last_limit})，不二次路由"
         )
-        return primary_id
+        return last
 
     # ========== 配置查找 ==========
 
