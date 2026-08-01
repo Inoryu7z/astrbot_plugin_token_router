@@ -1,3 +1,12 @@
+### v1.3.4
+
+**🔌 新增：存图模型用量追踪接口**
+
+* 新增 `get_active_storage_provider` / `record_storage_usage` / `get_storage_usage` 方法，供 wardrobe 等插件跨插件调用，实现存图模型按日用量路由。
+* 存图模型用量按 provider_id 独立追踪，每日 0 点自动重置，持久化到 `usage_data.json`。
+
+---
+
 ### v1.3.3
 
 **🎛️ 新增：/路由 命令按窗口开关插件介入**

@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
-    "1.3.3",
+    "1.3.4",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -50,6 +50,9 @@ class TokenRouterPlugin(Star):
         # 手动禁用状态: {umo: {persona_scope_key: True}}
         # 被 /路由 命令关闭的 (UMO, 人格) 对，插件暂停介入这些窗口
         self.disabled_windows: dict = {}
+        # 存图模型用量追踪: {provider_id: {date, usage}}
+        # 供 wardrobe 等插件跨插件调用，按日累计，0点重置
+        self.storage_usage: dict = {}
         self._load_usage_data()
         logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}，调试模式: {'开启' if self.debug else '关闭'}")
 
@@ -63,6 +66,7 @@ class TokenRouterPlugin(Star):
                 self.token_usage = data.get("window_usage", {})
                 self.global_usage = data.get("global_usage", {})
                 self.disabled_windows = data.get("disabled_windows", {})
+                self.storage_usage = data.get("storage_usage", {})
                 self._migrate_usage_data()
             except Exception as e:
                 logger.warning(f"Token路由: 加载用量数据失败: {e}")
@@ -94,6 +98,7 @@ class TokenRouterPlugin(Star):
                 "window_usage": self.token_usage,
                 "global_usage": self.global_usage,
                 "disabled_windows": self.disabled_windows,
+                "storage_usage": self.storage_usage,
             }
             with open(self.usage_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -213,6 +218,95 @@ class TokenRouterPlugin(Star):
             new_state = True
         self._save_usage_data()
         return new_state
+
+    # ========== 存图模型用量追踪（供 wardrobe 等插件跨插件调用） ==========
+
+    def _check_and_reset_storage(self, provider_id: str):
+        """检查并重置存图模型用量（按日重置）。"""
+        today = self._get_today_str()
+        if provider_id in self.storage_usage:
+            entry = self.storage_usage[provider_id]
+            if isinstance(entry, dict) and entry.get("date") != today:
+                entry["date"] = today
+                entry["usage"] = 0
+
+    def get_storage_usage(self, provider_id: str) -> int:
+        """获取存图模型当日用量（token）。"""
+        self._check_and_reset_storage(provider_id)
+        entry = self.storage_usage.get(provider_id)
+        if isinstance(entry, dict):
+            return entry.get("usage", 0)
+        return 0
+
+    def record_storage_usage(self, provider_id: str, tokens: int):
+        """记录存图模型用量。供 wardrobe 在存图分析完成后调用。"""
+        if not provider_id or tokens <= 0:
+            return
+        today = self._get_today_str()
+        if provider_id not in self.storage_usage:
+            self.storage_usage[provider_id] = {"date": today, "usage": 0}
+        self._check_and_reset_storage(provider_id)
+        self.storage_usage[provider_id]["usage"] += tokens
+        self._save_usage_data()
+        if self.debug:
+            logger.info(
+                f"Token路由[DEBUG]: 存图模型 {provider_id} 用量 "
+                f"{self.storage_usage[provider_id]['usage'] - tokens} → "
+                f"{self.storage_usage[provider_id]['usage']} (+{tokens})"
+            )
+
+    def get_active_storage_provider(
+        self,
+        primary_id: str,
+        secondary_id: str,
+        primary_limit: int,
+        secondary_limit: int,
+    ) -> str:
+        """根据当日用量决定存图应使用哪个模型。
+
+        逻辑：
+        - 主模型用量 < 主限额 → 返回主模型
+        - 主模型用量 ≥ 主限额 → 返回副模型
+        - 副模型用量 ≥ 副限额 → 仍返回副模型（不二次路由，仅日志告警）
+        - 无副模型 → 返回主模型（即使超限也继续用）
+
+        Args:
+            primary_id: 存图主模型 provider_id
+            secondary_id: 存图副模型 provider_id（可为空）
+            primary_limit: 主模型日限额（token）
+            secondary_limit: 副模型日限额（token）
+
+        Returns:
+            应使用的 provider_id
+        """
+        if not primary_id:
+            return secondary_id or primary_id
+
+        primary_usage = self.get_storage_usage(primary_id)
+        if primary_limit <= 0 or primary_usage < primary_limit:
+            return primary_id
+
+        # 主模型已达限额
+        if secondary_id:
+            secondary_usage = self.get_storage_usage(secondary_id)
+            if secondary_limit > 0 and secondary_usage >= secondary_limit:
+                logger.info(
+                    f"Token路由: 存图副模型 {secondary_id} 已达限额 "
+                    f"{secondary_usage}/{secondary_limit}，继续使用副模型（不二次路由）"
+                )
+            else:
+                logger.info(
+                    f"Token路由: 存图主模型 {primary_id} 用量 {primary_usage}/{primary_limit}，"
+                    f"切换到副模型 {secondary_id}"
+                )
+            return secondary_id
+
+        # 无副模型，继续用主模型
+        logger.info(
+            f"Token路由: 存图主模型 {primary_id} 用量 {primary_usage}/{primary_limit}，"
+            f"未配置副模型，继续使用主模型"
+        )
+        return primary_id
 
     # ========== 配置查找 ==========
 
