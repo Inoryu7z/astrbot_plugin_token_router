@@ -1,3 +1,13 @@
+### v1.3.5
+
+**🔌 新增：插件用量并入聊天每日额度**
+
+* 新增 `record_plugin_usage(provider_id, tokens, umo, persona_id)` 接口，供 aiimg（补拍 LLM 环节）、grok 搜索等插件跨插件上报 token 用量。
+* 插件消耗计入与聊天相同的每日额度桶（window/global）：插件与聊天合计达到某模型日限额时，聊天照常顺延到下一模型；插件自身不参与路由，继续使用其指定 provider。
+* `global` 模式按 provider 全局累计；`window` 模式下有事件按 (umo, 人格) 归属，后台无事件的上报自动归属到配置链路中引用了该 provider 的窗口作用域。
+
+---
+
 ### v1.3.4
 
 **🔌 新增：存图模型用量追踪接口**

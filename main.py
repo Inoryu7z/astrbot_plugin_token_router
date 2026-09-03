@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
-    "1.3.4",
+    "1.3.5",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -254,6 +254,61 @@ class TokenRouterPlugin(Star):
                 f"{self.storage_usage[provider_id]['usage'] - tokens} → "
                 f"{self.storage_usage[provider_id]['usage']} (+{tokens})"
             )
+
+    # ========== 插件用量记录（与聊天共享每日额度） ==========
+
+    def _find_plugin_umo_scopes(self, provider_id: str) -> list[tuple[str, str | None]]:
+        """查找配置链路中引用了该 provider_id 的所有窗口作用域 (umo, persona_id)。
+
+        供插件上报但无具体 umo 时（如 aiimg 后台定时补拍）归属使用。
+        """
+        scopes: list[tuple[str, str | None]] = []
+        windows_config = self.config.get("windows", {})
+        if not isinstance(windows_config, dict):
+            return scopes
+        for i in range(1, 11):
+            window = windows_config.get(f"window_{i}", {})
+            if not isinstance(window, dict):
+                continue
+            umo = window.get("umo", "")
+            models = window.get("models", [])
+            if not umo or not isinstance(models, list):
+                continue
+            if any(
+                isinstance(m, dict) and m.get("provider_id") == provider_id
+                for m in models
+            ):
+                scopes.append((umo, window.get("persona_id") or None))
+        return scopes
+
+    def record_plugin_usage(
+        self,
+        provider_id: str,
+        tokens: int,
+        umo: str = "",
+        persona_id: str | None = None,
+    ):
+        """记录插件（如 aiimg 补拍、grok 搜索）产生的 token 用量。
+
+        计入与聊天相同的每日额度桶（window/global），因此插件消耗达到限额时
+        聊天会照常顺延（_get_today_usage 会读到合并后的用量）；
+        插件自身不参与路由，仍继续使用其指定 provider。
+
+        - stats_mode=global：忽略 umo/persona，按 provider 全局累计
+        - stats_mode=window：
+            - 提供了 umo：按 (umo, persona) 累计
+            - umo 为空（后台任务无事件）：归属到所有配置链路中引用该 provider 的窗口作用域
+        """
+        if not provider_id or tokens <= 0:
+            return
+        if self.stats_mode != "global":
+            if not umo:
+                scopes = self._find_plugin_umo_scopes(provider_id)
+                if scopes:
+                    for s_umo, s_persona in scopes:
+                        self._record_usage(s_umo, s_persona, provider_id, tokens)
+                    return
+        self._record_usage(umo, persona_id, provider_id, tokens)
 
     def get_active_storage_provider(self, providers: list[dict]) -> str:
         """根据当日用量决定存图应使用哪个模型（支持 N 级回退链）。
