@@ -28,7 +28,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
-    "1.3.5",
+    "1.3.6",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -310,12 +310,50 @@ class TokenRouterPlugin(Star):
                     return
         self._record_usage(umo, persona_id, provider_id, tokens)
 
+    def get_provider_daily_usage(self, provider_id: str) -> int:
+        """获取某 provider 当日总用量（合并所有维度）。
+
+        语义：同一 provider 同时作为聊天模型与插件（存图/补拍/搜索）模型时，
+        各处消耗共享同一日额度。global 模式返回全局桶用量；
+        window 模式返回所有窗口作用域（含空 umo 作用域）中该 provider 的用量之和。
+        """
+        if not provider_id:
+            return 0
+        if self.stats_mode == "global":
+            self._check_and_reset_global(provider_id)
+            entry = self.global_usage.get(provider_id)
+            if isinstance(entry, dict):
+                return entry.get("usage", 0)
+            return 0
+        total = 0
+        for umo, data in self.token_usage.items():
+            if not isinstance(data, dict):
+                continue
+            for scope_key, scope in data.items():
+                if not isinstance(scope, dict):
+                    continue
+                self._check_and_reset_daily(umo, scope_key or None, provider_id)
+                entry = scope.get(provider_id)
+                if isinstance(entry, dict):
+                    total += entry.get("usage", 0)
+        return total
+
+    def _get_storage_total_usage(self, provider_id: str) -> int:
+        """存图路由判定用量 = 存图桶 + 聊天/插件桶（共享日额度）。
+
+        兼容旧调用方：旧版 wardrobe 只上报存图桶、新版上报聊天桶，
+        两者来源不同不会重复计数，相加即该 provider 当日总消耗。
+        """
+        return self.get_storage_usage(provider_id) + self.get_provider_daily_usage(provider_id)
+
     def get_active_storage_provider(self, providers: list[dict]) -> str:
         """根据当日用量决定存图应使用哪个模型（支持 N 级回退链）。
 
         逻辑：
         - 按列表顺序找第一个未达限额的 provider（limit<=0 表示不限制）
         - 全部达限额 → 返回列表最后一个（不二次路由，仅日志告警）
+        - 用量口径为「存图桶 + 聊天/插件桶」：同一 provider 同时作为
+          聊天模型与存图模型时共享日额度，任何一方的消耗都会触发切换
 
         Args:
             providers: [{"id": "xxx", "daily_limit": 1500000}, ...]
@@ -334,7 +372,7 @@ class TokenRouterPlugin(Star):
                 continue
             if limit <= 0:
                 return pid
-            usage = self.get_storage_usage(pid)
+            usage = self._get_storage_total_usage(pid)
             if usage < limit:
                 return pid
             logger.info(
@@ -345,7 +383,7 @@ class TokenRouterPlugin(Star):
         # 全部达限额，返回最后一个
         last = providers[-1].get("id", "")
         last_limit = int(providers[-1].get("daily_limit", 0) or 0)
-        last_usage = self.get_storage_usage(last) if last else 0
+        last_usage = self._get_storage_total_usage(last) if last else 0
         logger.info(
             f"Token路由: 存图模型全部达限额，继续使用最后一个 {last} "
             f"({last_usage}/{last_limit})，不二次路由"
