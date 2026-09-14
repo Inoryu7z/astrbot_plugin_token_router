@@ -196,12 +196,12 @@ Token路由[DEBUG]: UMO aiocqhttp:GroupMessage:123456/人格 bot_a 模型切换 
 
 ## ⚠️ 注意事项
 
-1. 插件仅在 `on_llm_response` 中累计 `usage.total`（含输入与输出 token），不包含流式过程中的中间统计。
+1. 插件在 `on_llm_response` 中累计 `usage.total`（含输入与输出 token）。由于框架的响应钩子每条消息只携带最终一步的用量，多步 agent（工具调用）中间步的消耗钩子本身看不到——插件会自动从框架数据库读取当日真实用量（与 WebUI 面板同源）把漏计部分补回路由判定，无需额外配置。
 2. 用量数据持久化在插件数据目录的 `usage_data.json` 中，重启 AstrBot 不会丢失当日计数。
 3. 插件通过 `event.set_extra("selected_provider")` 指定 provider，仅影响对应窗口的当次请求，不改变会话级 provider。
 4. 当所有模型用尽并回退默认模型后，当天该 (UMO, 人格) 不再参与路由；次日 0 点自动恢复。
 5. 插件不主动设置初始模型，仅在限额触发时切换；模型 1 的初始状态由框架配置决定。
-6. 若配置的 `provider_id` 在 AstrBot 中不存在，切换会失败并记录警告日志，不影响其他流程。
+6. 若配置的 `provider_id` 在 AstrBot 中不存在，框架会直接报错并终止本次 LLM 请求（用户会收到错误提示），不会回退到默认模型——请确保窗口配置里的 `provider_id` 与 WebUI 提供商 ID 完全一致。
 7. 全局统计模式下，用量计数按 provider 共享，但「已用尽」标记按 (UMO, 人格) 独立——因为每个 (UMO, 人格) 有自己的路由链。
 8. 人格 ID 通过框架 `PersonaManager.resolve_selected_persona` 解析，解析优先级：UMO 级强制人格 > 会话级人格 > 默认人格。
 9. v1.1.0 升级后会自动迁移 v1.0.0 的用量数据到人格嵌套格式，旧数据归入空人格 ID 作用域，不影响已有计数。

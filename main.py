@@ -11,24 +11,33 @@ astrbot_plugin_token_router - Token用量追踪与模型路由插件
 
 v1.1.0 新增：基于人格(persona)的路由。同一UMO下可配置多个窗口，
 每个窗口绑定不同人格ID，实现多人格各自独立的路由链与用量计数。
+
+v1.4.0 新增：DB用量校准。框架的 LLM 响应钩子每条消息只携带最终一步的
+usage，多步 agent（工具调用等）中间步的消耗钩子看不到，导致本地桶漏计。
+开启校准后从框架 provider_stats 表读取当日各 provider 真实总量
+（与 WebUI 面板同源），把差值按各作用域纯聊天量占比分摊进路由判定用量。
 """
 
 import json
 import datetime
+import time
 from pathlib import Path
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import LLMResponse, ProviderType
 from astrbot.core.star.star_tools import StarTools
+from sqlalchemy import func, select
+from sqlmodel import col
 
 
 @register(
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
-    "1.3.6",
+    "1.4.0",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -53,6 +62,15 @@ class TokenRouterPlugin(Star):
         # 存图模型用量追踪: {provider_id: {date, usage}}
         # 供 wardrobe 等插件跨插件调用，按日累计，0点重置
         self.storage_usage: dict = {}
+        # DB用量校准（v1.4.0，恒开启）：
+        # 框架 OnLLMResponseEvent 每条消息只携带最终一步的 usage，多步 agent 的
+        # 中间步（工具调用等）插件钩子看不到，导致钩子桶漏计。每条消息从框架
+        # provider_stats 表读取当日各 provider 真实总量（与 WebUI 面板同源），
+        # 把「DB总量 - 钩子纯聊天量」的差值按各作用域纯聊天量占比分摊进路由
+        # 判定用量，使判定与面板/后端对齐。查询失败自动按无校准处理，不影响运行。
+        self._db_cache_ttl = 5.0  # 秒，DB查询节流
+        self._db_cache_ts = 0.0  # 上次成功查询的 monotonic 时间戳
+        self._db_usage_cache: dict[str, int] = {}  # {provider_id: 当日DB总量}
         self._load_usage_data()
         logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}，调试模式: {'开启' if self.debug else '关闭'}")
 
@@ -68,8 +86,29 @@ class TokenRouterPlugin(Star):
                 self.disabled_windows = data.get("disabled_windows", {})
                 self.storage_usage = data.get("storage_usage", {})
                 self._migrate_usage_data()
+                self._ensure_chat_usage_fields()
             except Exception as e:
                 logger.warning(f"Token路由: 加载用量数据失败: {e}")
+
+    def _ensure_chat_usage_fields(self):
+        """为旧版用量条目补 chat_usage 字段（v1.4.0 DB校准所需）。
+
+        旧格式 entry 仅含 {date, usage}，无法区分钩子记的聊天量与插件
+        上报量。历史数据按「全部为聊天量」近似处理，仅影响升级当日剩余
+        时段的校准分摊占比，次日 0 点重置后即为精确口径。
+        """
+        for data in self.token_usage.values():
+            if not isinstance(data, dict):
+                continue
+            for scope in data.values():
+                if not isinstance(scope, dict):
+                    continue
+                for entry in scope.values():
+                    if isinstance(entry, dict) and "chat_usage" not in entry:
+                        entry["chat_usage"] = entry.get("usage", 0)
+        for entry in self.global_usage.values():
+            if isinstance(entry, dict) and "chat_usage" not in entry:
+                entry["chat_usage"] = entry.get("usage", 0)
 
     def _migrate_usage_data(self):
         """将旧版扁平格式迁移到人格感知的嵌套格式。
@@ -124,6 +163,7 @@ class TokenRouterPlugin(Star):
             if isinstance(entry, dict) and entry.get("date") != today:
                 entry["date"] = today
                 entry["usage"] = 0
+                entry["chat_usage"] = 0
 
     def _check_and_reset_global(self, provider_id: str):
         today = self._get_today_str()
@@ -132,6 +172,7 @@ class TokenRouterPlugin(Star):
             if isinstance(entry, dict) and entry.get("date") != today:
                 entry["date"] = today
                 entry["usage"] = 0
+                entry["chat_usage"] = 0
 
     def _is_all_exhausted(self, umo: str, persona_id: str | None) -> bool:
         today = self._get_today_str()
@@ -147,37 +188,161 @@ class TokenRouterPlugin(Star):
 
     # ========== 用量记录 ==========
 
-    def _record_usage(self, umo: str, persona_id: str | None, provider_id: str, tokens: int):
+    def _record_usage(
+        self,
+        umo: str,
+        persona_id: str | None,
+        provider_id: str,
+        tokens: int,
+        kind: str = "chat",
+    ):
+        """记录用量。kind="chat" 为钩子记账（计入 chat_usage，参与校准分摊）；
+        kind="plugin" 为跨插件上报（仅计入总用量，不参与校准分摊）。"""
         today = self._get_today_str()
         if self.stats_mode == "global":
             if provider_id not in self.global_usage:
-                self.global_usage[provider_id] = {"date": today, "usage": 0}
+                self.global_usage[provider_id] = {
+                    "date": today,
+                    "usage": 0,
+                    "chat_usage": 0,
+                }
             self._check_and_reset_global(provider_id)
             self.global_usage[provider_id]["usage"] += tokens
+            if kind == "chat":
+                self.global_usage[provider_id]["chat_usage"] += tokens
         else:
             scope = self._get_window_scope(umo, persona_id)
             if provider_id not in scope:
-                scope[provider_id] = {"date": today, "usage": 0}
+                scope[provider_id] = {
+                    "date": today,
+                    "usage": 0,
+                    "chat_usage": 0,
+                }
             self._check_and_reset_daily(umo, persona_id, provider_id)
             scope[provider_id]["usage"] += tokens
+            if kind == "chat":
+                scope[provider_id]["chat_usage"] += tokens
         self._save_usage_data()
 
+    # ========== DB 用量校准（v1.4.0） ==========
+
+    def _entry_chat_usage(self, entry: dict) -> int:
+        """读取条目的纯聊天量（钩子记账部分），旧数据缺字段时按总量兜底。"""
+        v = entry.get("chat_usage")
+        if v is None:
+            return entry.get("usage", 0)
+        return v
+
+    async def _refresh_db_usage_cache(self):
+        """从框架 provider_stats 表刷新当日各 provider 真实用量（TTL 节流）。
+
+        口径与 WebUI 面板一致：agent_type="internal"，本地今日 0 点起
+        （DB 的 created_at 为 UTC，需换算），不过滤 status（aborted/error
+        的记录同样计费），按 input_other + input_cached + output 汇总。
+        查询失败时保留旧缓存，校准退化为旧值或 0，不影响正常运行。
+        """
+        now = time.monotonic()
+        if now - self._db_cache_ts < self._db_cache_ttl:
+            return
+        try:
+            db = self.context.get_db()
+            local_today_start = (
+                datetime.datetime.now()
+                .astimezone()
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+            )
+            utc_start = local_today_start.astimezone(datetime.timezone.utc)
+            async with db.get_db() as session:
+                result = await session.execute(
+                    select(
+                        ProviderStat.provider_id,
+                        func.coalesce(func.sum(ProviderStat.token_input_other), 0),
+                        func.coalesce(func.sum(ProviderStat.token_input_cached), 0),
+                        func.coalesce(func.sum(ProviderStat.token_output), 0),
+                    ).where(
+                        col(ProviderStat.agent_type) == "internal",
+                        col(ProviderStat.created_at) >= utc_start,
+                    ).group_by(ProviderStat.provider_id)
+                )
+                rows = result.all()
+            cache: dict[str, int] = {}
+            for row in rows:
+                provider_id, in_other, in_cached, out = row
+                if not provider_id:
+                    continue
+                cache[provider_id] = (
+                    int(in_other or 0) + int(in_cached or 0) + int(out or 0)
+                )
+            self._db_usage_cache = cache
+            self._db_cache_ts = now
+            if self.debug:
+                logger.info(f"Token路由[DEBUG]: DB用量校准数据已刷新: {cache}")
+        except Exception as e:
+            # 失败时也推进时间戳，避免每条消息都重试打日志
+            self._db_cache_ts = now
+            logger.debug(f"Token路由: DB用量校准查询失败(按无校准处理): {e}")
+
+    def _hook_chat_total(self, provider_id: str) -> int:
+        """所有作用域中该 provider 的纯聊天量之和（校准分摊的分母）。"""
+        total = 0
+        if self.stats_mode == "global":
+            entry = self.global_usage.get(provider_id)
+            if isinstance(entry, dict):
+                total = self._entry_chat_usage(entry)
+        else:
+            for data in self.token_usage.values():
+                if not isinstance(data, dict):
+                    continue
+                for scope in data.values():
+                    if not isinstance(scope, dict):
+                        continue
+                    entry = scope.get(provider_id)
+                    if isinstance(entry, dict):
+                        total += self._entry_chat_usage(entry)
+        return total
+
+    def _calibration_share(self, provider_id: str, hook_chat: int) -> int:
+        """计算当前作用域应分摊的校准量。
+
+        差值 = DB当日总量 - 钩子纯聊天量（钩子只看到每条消息最后一步，
+        差值即中间步/中断等被漏掉的部分）。按各作用域纯聊天量占比分摊，
+        所有作用域份额之和恰等于差值，保证求和口径不重复、不遗漏。
+        """
+        if not self._db_usage_cache or self._db_cache_ts <= 0:
+            return 0
+        db_total = self._db_usage_cache.get(provider_id, 0)
+        if db_total <= 0:
+            return 0
+        hook_total = self._hook_chat_total(provider_id)
+        if hook_total <= 0 or hook_chat <= 0:
+            return 0
+        diff = db_total - hook_total
+        if diff <= 0:
+            return 0
+        return int(diff * hook_chat / hook_total)
+
     def _get_today_usage(self, umo: str, persona_id: str | None, provider_id: str) -> int:
+        """当日用量（含插件上报 + DB 校准分摊）。
+
+        校准逻辑：DB 缓存中有该 provider 的当日总量、且大于钩子纯聊天量时，
+        把差值按占比分摊进来，使路由判定与 WebUI 面板/后端口径对齐。
+        DB 缓存未刷新（如刚重启、查询失败）时校准量为 0，退化为旧行为。
+        """
         if self.stats_mode == "global":
             self._check_and_reset_global(provider_id)
-            if provider_id in self.global_usage:
-                entry = self.global_usage[provider_id]
-                if isinstance(entry, dict):
-                    return entry.get("usage", 0)
-            return 0
+            entry = self.global_usage.get(provider_id)
+            if not isinstance(entry, dict):
+                return 0
+            base = entry.get("usage", 0)
+            return base + self._calibration_share(provider_id, self._entry_chat_usage(entry))
         else:
             self._check_and_reset_daily(umo, persona_id, provider_id)
             scope = self._peek_window_scope(umo, persona_id)
-            if scope and provider_id in scope:
-                entry = scope[provider_id]
-                if isinstance(entry, dict):
-                    return entry.get("usage", 0)
-            return 0
+            entry = scope.get(provider_id) if scope else None
+            if not isinstance(entry, dict):
+                return 0
+            base = entry.get("usage", 0)
+            return base + self._calibration_share(provider_id, self._entry_chat_usage(entry))
 
     # ========== 窗口作用域辅助 ==========
 
@@ -297,7 +462,9 @@ class TokenRouterPlugin(Star):
         - stats_mode=global：忽略 umo/persona，按 provider 全局累计
         - stats_mode=window：
             - 提供了 umo：按 (umo, persona) 累计
-            - umo 为空（后台任务无事件）：归属到所有配置链路中引用该 provider 的窗口作用域
+            - umo 为空（后台任务无事件）：归属到配置链路中**第一个**引用该
+              provider 的窗口作用域（v1.4.0 起不再复制到每个匹配窗口，
+              修复多窗口引用同一 provider 时的 N 倍重复计数）
         """
         if not provider_id or tokens <= 0:
             return
@@ -305,37 +472,31 @@ class TokenRouterPlugin(Star):
             if not umo:
                 scopes = self._find_plugin_umo_scopes(provider_id)
                 if scopes:
-                    for s_umo, s_persona in scopes:
-                        self._record_usage(s_umo, s_persona, provider_id, tokens)
+                    s_umo, s_persona = scopes[0]
+                    self._record_usage(s_umo, s_persona, provider_id, tokens, kind="plugin")
                     return
-        self._record_usage(umo, persona_id, provider_id, tokens)
+        self._record_usage(umo, persona_id, provider_id, tokens, kind="plugin")
 
     def get_provider_daily_usage(self, provider_id: str) -> int:
-        """获取某 provider 当日总用量（合并所有维度）。
+        """获取某 provider 当日总用量（合并所有维度，含 DB 校准分摊）。
 
         语义：同一 provider 同时作为聊天模型与插件（存图/补拍/搜索）模型时，
         各处消耗共享同一日额度。global 模式返回全局桶用量；
         window 模式返回所有窗口作用域（含空 umo 作用域）中该 provider 的用量之和。
+        各作用域的校准份额之和恰等于总差值，求和不会重复计数。
         """
         if not provider_id:
             return 0
         if self.stats_mode == "global":
-            self._check_and_reset_global(provider_id)
-            entry = self.global_usage.get(provider_id)
-            if isinstance(entry, dict):
-                return entry.get("usage", 0)
-            return 0
+            return self._get_today_usage("", None, provider_id)
         total = 0
         for umo, data in self.token_usage.items():
             if not isinstance(data, dict):
                 continue
-            for scope_key, scope in data.items():
-                if not isinstance(scope, dict):
+            for scope_key in data.keys():
+                if scope_key == "_exhausted":
                     continue
-                self._check_and_reset_daily(umo, scope_key or None, provider_id)
-                entry = scope.get(provider_id)
-                if isinstance(entry, dict):
-                    total += entry.get("usage", 0)
+                total += self._get_today_usage(umo, scope_key or None, provider_id)
         return total
 
     def _get_storage_total_usage(self, provider_id: str) -> int:
@@ -563,6 +724,9 @@ class TokenRouterPlugin(Star):
                 )
             return
 
+        # 刷新 DB 用量校准缓存（TTL 节流，判定用量前保证数据尽量新鲜）
+        await self._refresh_db_usage_cache()
+
         persona_id = await self._get_current_persona_id(event)
         window_config = self._find_window_config(umo, persona_id)
         if not window_config:
@@ -633,6 +797,8 @@ class TokenRouterPlugin(Star):
         每条消息独立决定使用的 provider，不与系统指令/其他插件冲突。
         """
         umo = event.unified_msg_origin
+        # 刷新 DB 用量校准缓存（TTL 节流），供记账后的限额判定使用
+        await self._refresh_db_usage_cache()
         persona_id = await self._get_current_persona_id(event)
         window_config = self._find_window_config(umo, persona_id)
         if not window_config:
