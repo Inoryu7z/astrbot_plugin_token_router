@@ -16,6 +16,16 @@ v1.4.0 新增：DB用量校准。框架的 LLM 响应钩子每条消息只携带
 usage，多步 agent（工具调用等）中间步的消耗钩子看不到，导致本地桶漏计。
 开启校准后从框架 provider_stats 表读取当日各 provider 真实总量
 （与 WebUI 面板同源），把差值按各作用域纯聊天量占比分摊进路由判定用量。
+
+v1.5.0 新增：多模态顺延。每个窗口可选开启，两种模式：
+- 正向顺延：消息带图片而当前模型不支持图片输入时，往后顺延到第一个
+  「支持图片且当日未达限额」的模型，避免图片被框架替换成 [Image] 占位符。
+- 反选模式：消息不带图片而当前模型支持图片输入时，往后顺延到第一个
+  「不支持图片且当日未达限额」的模型，避免多模态模型的额度被纯文本占用。
+两者都只往后找，找不到符合条件的模型时继续使用当前模型。
+
+v1.5.0 新增：自定义每日重置时间。全局配置 reset_hour（0-23，默认 0）指定
+每天的用量周期起点，小于该小时数的时刻仍计入前一天的周期。
 """
 
 import json
@@ -25,6 +35,7 @@ from pathlib import Path
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Reply
 from astrbot.api.star import Context, Star, register
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import LLMResponse, ProviderType
@@ -33,11 +44,41 @@ from sqlalchemy import func, select
 from sqlmodel import col
 
 
+def _normalize_reset_hour(value) -> int:
+    """校验配置的每日重置小时，非法值回退为 0 点。"""
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Token路由: reset_hour 配置值 {value!r} 非法，已回退为 0 点重置")
+        return 0
+    if not 0 <= hour <= 23:
+        logger.warning(
+            f"Token路由: reset_hour 配置值 {hour} 超出 0-23 范围，已回退为 0 点重置"
+        )
+        return 0
+    return hour
+
+
+def _resolve_usage_day_start(
+    reset_hour: int, now: datetime.datetime | None = None
+) -> datetime.datetime:
+    """按重置小时计算当前用量周期的起点（本地时区）。
+
+    reset_hour=4 时：03:59 仍属于前一天的周期，04:00 起进入新周期。
+    """
+    if now is None:
+        now = datetime.datetime.now().astimezone()
+    start = now.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+    if now < start:
+        start -= datetime.timedelta(days=1)
+    return start
+
+
 @register(
     "astrbot_plugin_token_router",
     "Inoryu7z",
-    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每天0点自动重置。支持基于人格的独立路由。提供 /路由 命令按窗口开关插件介入。",
-    "1.4.0",
+    "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每日定时自动重置（重置时间可配置）。支持基于人格的独立路由与多模态跳过。提供 /路由 命令按窗口开关插件介入。",
+    "1.5.0",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -51,6 +92,9 @@ class TokenRouterPlugin(Star):
         self.usage_file = self.data_dir / "usage_data.json"
         self.stats_mode = self.config.get("stats_mode", "window")
         self.debug = bool(self.config.get("debug", False))
+        # 每日用量周期的起点小时（本地时间，0-23）。小于该小时的时刻
+        # 仍计入前一天的周期，例如填 4 表示每天凌晨 4 点重置。
+        self.reset_hour = _normalize_reset_hour(self.config.get("reset_hour", 0))
         # 窗口模式: {umo: {persona_scope: {provider_id: {date, usage}, _exhausted: date}}}
         # persona_scope 为人格ID字符串，空字符串表示未指定人格(兼容旧配置)
         self.token_usage: dict = {}
@@ -71,8 +115,13 @@ class TokenRouterPlugin(Star):
         self._db_cache_ttl = 5.0  # 秒，DB查询节流
         self._db_cache_ts = 0.0  # 上次成功查询的 monotonic 时间戳
         self._db_usage_cache: dict[str, int] = {}  # {provider_id: 当日DB总量}
+        self._db_cache_day = ""  # 缓存对应的用量周期日期（YYYY-MM-DD）
         self._load_usage_data()
-        logger.info(f"Token路由插件已加载，统计模式: {self.stats_mode}，调试模式: {'开启' if self.debug else '关闭'}")
+        logger.info(
+            f"Token路由插件已加载，统计模式: {self.stats_mode}，"
+            f"调试模式: {'开启' if self.debug else '关闭'}，"
+            f"每日重置: {self.reset_hour} 点"
+        )
 
     # ========== 数据持久化 ==========
 
@@ -146,8 +195,13 @@ class TokenRouterPlugin(Star):
 
     # ========== 日期与重置 ==========
 
+    def _get_usage_day_start(self) -> datetime.datetime:
+        """当前用量周期的起点（本地时区），由 reset_hour 决定。"""
+        return _resolve_usage_day_start(self.reset_hour)
+
     def _get_today_str(self) -> str:
-        return datetime.datetime.now().strftime("%Y-%m-%d")
+        """当前用量周期的标识日期(YYYY-MM-DD)，用作各用量桶的 date 字段。"""
+        return self._get_usage_day_start().strftime("%Y-%m-%d")
 
     def _check_and_reset_daily(self, umo: str, persona_id: str | None, provider_id: str):
         scope = self._peek_window_scope(umo, persona_id)
@@ -236,22 +290,22 @@ class TokenRouterPlugin(Star):
     async def _refresh_db_usage_cache(self):
         """从框架 provider_stats 表刷新当日各 provider 真实用量（TTL 节流）。
 
-        口径与 WebUI 面板一致：agent_type="internal"，本地今日 0 点起
-        （DB 的 created_at 为 UTC，需换算），不过滤 status（aborted/error
-        的记录同样计费），按 input_other + input_cached + output 汇总。
-        查询失败时保留旧缓存，校准退化为旧值或 0，不影响正常运行。
+        口径与 WebUI 面板一致（agent_type="internal"，不过滤 status，
+        aborted/error 的记录同样计费，按 input_other + input_cached + output
+        汇总），但时间起点取**当前用量周期的起点**而非自然日 0 点：配置了
+        reset_hour 后两者不同，若仍按 0 点查询，上一周期尾巴的消耗会被当作
+        差值补进本周期。DB 的 created_at 是 UTC，需由本地周期起点换算。
+        查询失败时清空跨周期旧缓存，校准退化为 0，不影响正常运行。
         """
         now = time.monotonic()
-        if now - self._db_cache_ts < self._db_cache_ttl:
+        day = self._get_today_str()
+        if now - self._db_cache_ts < self._db_cache_ttl and day == self._db_cache_day:
             return
         try:
             db = self.context.get_db()
-            local_today_start = (
-                datetime.datetime.now()
-                .astimezone()
-                .replace(hour=0, minute=0, second=0, microsecond=0)
+            utc_start = self._get_usage_day_start().astimezone(
+                datetime.timezone.utc
             )
-            utc_start = local_today_start.astimezone(datetime.timezone.utc)
             async with db.get_db() as session:
                 result = await session.execute(
                     select(
@@ -275,11 +329,16 @@ class TokenRouterPlugin(Star):
                 )
             self._db_usage_cache = cache
             self._db_cache_ts = now
+            self._db_cache_day = day
             if self.debug:
                 logger.info(f"Token路由[DEBUG]: DB用量校准数据已刷新: {cache}")
         except Exception as e:
             # 失败时也推进时间戳，避免每条消息都重试打日志
             self._db_cache_ts = now
+            if day != self._db_cache_day:
+                # 周期已切换但本次查询失败：旧周期缓存不可用，宁可退化为无校准
+                self._db_usage_cache = {}
+                self._db_cache_day = day
             logger.debug(f"Token路由: DB用量校准查询失败(按无校准处理): {e}")
 
     def _hook_chat_total(self, provider_id: str) -> int:
@@ -309,6 +368,9 @@ class TokenRouterPlugin(Star):
         所有作用域份额之和恰等于差值，保证求和口径不重复、不遗漏。
         """
         if not self._db_usage_cache or self._db_cache_ts <= 0:
+            return 0
+        # 缓存必须属于当前用量周期（周期切换后未刷新时不得拿旧周期数据校准）
+        if self._db_cache_day != self._get_today_str():
             return 0
         db_total = self._db_usage_cache.get(provider_id, 0)
         if db_total <= 0:
@@ -606,6 +668,112 @@ class TokenRouterPlugin(Star):
                 return i
         return -1
 
+    # ========== 多模态顺延（v1.5.0） ==========
+
+    def _provider_supports_image(self, provider_id: str) -> bool:
+        """判断 provider 是否支持图片输入。
+
+        口径与框架对齐（astr_main_agent.py:_provider_supports_modality）：
+        读取 provider 配置的 modalities 列表，含 "image" 即视为多模态。
+        modalities 未配置（None/空列表）或查不到该 provider 配置时视为支持，
+        以免插件的模态判断与框架（未配置=支持全部模态）产生分歧。
+        """
+        if not provider_id:
+            return True
+        config = None
+        try:
+            # 优先读实时配置（merged=True 才含 provider_source 层级的 modalities）
+            config = self.context.provider_manager.get_provider_config_by_id(
+                provider_id, merged=True
+            )
+        except Exception:
+            config = None
+        if not isinstance(config, dict):
+            # 回退到 provider 实例上的配置（框架自身读 modalities 的方式）
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+                config = getattr(provider, "provider_config", None)
+            except Exception:
+                config = None
+        if not isinstance(config, dict):
+            return True
+        modalities = config.get("modalities", None)
+        if not isinstance(modalities, list) or not modalities:
+            return True
+        return "image" in modalities
+
+    def _model_supports_image(self, model) -> bool:
+        """判断路由链中的模型条目是否支持图片输入。"""
+        if not isinstance(model, dict):
+            return True
+        return self._provider_supports_image(model.get("provider_id", ""))
+
+    def _message_needs_image(self, event: AstrMessageEvent) -> bool:
+        """当前消息是否带图片（含引用消息内的图片）。
+
+        只认 Image 组件，与框架图片兜底切换的口径一致
+        （astr_main_agent.py:_select_image_chat_provider 只看 image_urls）。
+        """
+        try:
+            for comp in event.message_obj.message:
+                if isinstance(comp, Image):
+                    return True
+                if isinstance(comp, Reply):
+                    for quoted_comp in getattr(comp, "chain", None) or []:
+                        if isinstance(quoted_comp, Image):
+                            return True
+        except Exception:
+            return False
+        return False
+
+    def _resolve_modality_index(
+        self,
+        umo: str,
+        persona_id: str | None,
+        models: list,
+        active_index: int,
+        needs_image: bool,
+        mode: str,
+    ) -> int:
+        """按模态规则在路由链上往后找可承接的模型，返回最终索引。
+
+        - forward：消息带图、当前模型不支持图片 → 找之后的第一个
+          「支持图片且当日未达限额」的模型
+        - reverse：消息不带图、当前模型支持图片 → 找之后的第一个
+          「不支持图片且当日未达限额」的模型
+
+        两个模式都只往后找（当前模型之前的模型按定义已用尽额度），
+        找不到符合条件的模型时返回原索引，即继续使用当前模型。
+        """
+        if mode not in ("forward", "reverse"):
+            return active_index
+        if not models or not 0 <= active_index < len(models):
+            return active_index
+
+        current_supports_image = self._model_supports_image(models[active_index])
+        if mode == "forward":
+            if not needs_image or current_supports_image:
+                return active_index
+            want_image = True
+        else:
+            if needs_image or not current_supports_image:
+                return active_index
+            want_image = False
+
+        for i in range(active_index + 1, len(models)):
+            model = models[i]
+            if not isinstance(model, dict):
+                continue
+            provider_id = model.get("provider_id", "")
+            if not provider_id:
+                continue
+            if self._model_supports_image(model) != want_image:
+                continue
+            daily_limit = model.get("daily_limit", 200000)
+            if self._get_today_usage(umo, persona_id, provider_id) < daily_limit:
+                return i
+        return active_index
+
     # ========== Provider操作 ==========
 
     def _get_current_provider_id(self, umo: str) -> str | None:
@@ -769,6 +937,30 @@ class TokenRouterPlugin(Star):
                     f"Token路由[DEBUG]: UMO {umo}{persona_tag} 跳过：无可用模型(active_index=-1)"
                 )
             return
+
+        # 多模态顺延（v1.5.0）：按窗口配置的模态规则调整本次使用的模型
+        modality_mode = window_config.get("modality_skip", "off")
+        if modality_mode in ("forward", "reverse"):
+            needs_image = self._message_needs_image(event)
+            resolved_index = self._resolve_modality_index(
+                umo, persona_id, models, active_index, needs_image, modality_mode
+            )
+            if self.debug:
+                persona_tag = f"/人格 {persona_id}" if persona_id else ""
+                mode_name = "正向顺延" if modality_mode == "forward" else "反选模式"
+                fallback_tag = (
+                    "（无符合条件的目标，沿用当前模型）"
+                    if resolved_index == active_index
+                    else ""
+                )
+                logger.info(
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 多模态路由[{mode_name}] "
+                    f"消息带图={needs_image} 当前模型[{active_index}]="
+                    f"{models[active_index].get('provider_id', '')} → 使用模型"
+                    f"[{resolved_index}]={models[resolved_index].get('provider_id', '')}"
+                    f"{fallback_tag}"
+                )
+            active_index = resolved_index
 
         active_model = models[active_index]
         target_provider_id = active_model.get("provider_id", "")
