@@ -330,8 +330,8 @@ class TokenRouterPlugin(Star):
             self._db_usage_cache = cache
             self._db_cache_ts = now
             self._db_cache_day = day
-            if self.debug:
-                logger.info(f"Token路由[DEBUG]: DB用量校准数据已刷新: {cache}")
+            # 高频诊断信息：降为 debug 级，避免 debug 模式下每条消息刷屏
+            logger.debug(f"Token路由: DB用量校准数据已刷新: {cache}")
         except Exception as e:
             # 失败时也推进时间戳，避免每条消息都重试打日志
             self._db_cache_ts = now
@@ -938,29 +938,16 @@ class TokenRouterPlugin(Star):
                 )
             return
 
-        # 多模态顺延（v1.5.0）：按窗口配置的模态规则调整本次使用的模型
+        # 多模态顺延（v1.5.0）：按窗口配置的模态规则调整本次使用的模型。
+        # 本阶段不发日志，路由决策存入 event extra，由 on_llm_response
+        # 在回复完成后输出单条汇总日志（避免一条消息多条 DEBUG 刷屏）。
         modality_mode = window_config.get("modality_skip", "off")
+        quota_provider_id = models[active_index].get("provider_id", "")
         if modality_mode in ("forward", "reverse"):
             needs_image = self._message_needs_image(event)
-            resolved_index = self._resolve_modality_index(
+            active_index = self._resolve_modality_index(
                 umo, persona_id, models, active_index, needs_image, modality_mode
             )
-            if self.debug:
-                persona_tag = f"/人格 {persona_id}" if persona_id else ""
-                mode_name = "正向顺延" if modality_mode == "forward" else "反选模式"
-                fallback_tag = (
-                    "（无符合条件的目标，沿用当前模型）"
-                    if resolved_index == active_index
-                    else ""
-                )
-                logger.info(
-                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 多模态路由[{mode_name}] "
-                    f"消息带图={needs_image} 当前模型[{active_index}]="
-                    f"{models[active_index].get('provider_id', '')} → 使用模型"
-                    f"[{resolved_index}]={models[resolved_index].get('provider_id', '')}"
-                    f"{fallback_tag}"
-                )
-            active_index = resolved_index
 
         active_model = models[active_index]
         target_provider_id = active_model.get("provider_id", "")
@@ -973,12 +960,14 @@ class TokenRouterPlugin(Star):
 
         # 通过框架原生机制指定provider
         event.set_extra("selected_provider", target_provider_id)
-
-        if self.debug:
-            persona_tag = f"/人格 {persona_id}" if persona_id else ""
-            logger.info(
-                f"Token路由[DEBUG]: UMO {umo}{persona_tag} 本次使用模型 {target_provider_id}"
-            )
+        # 路由决策信息（额度路由选出的模型 + 模态顺延模式），供汇总日志展示
+        event.set_extra(
+            "token_router_route",
+            {
+                "from": quota_provider_id,
+                "mode": modality_mode if modality_mode in ("forward", "reverse") else "",
+            },
+        )
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -1046,8 +1035,22 @@ class TokenRouterPlugin(Star):
                 after = self._get_today_usage(umo, persona_id, provider_id)
                 persona_tag = f"/人格 {persona_id}" if persona_id else ""
                 scope_tag = "(全局)" if self.stats_mode == "global" else ""
+                # 单条汇总：模型 + 多模态顺延来源 + 用量变动
+                route_info = event.get_extra("token_router_route")
+                if not isinstance(route_info, dict):
+                    route_info = {}
+                model_part = provider_id
+                if (
+                    route_info.get("mode") in ("forward", "reverse")
+                    and route_info.get("from")
+                    and route_info["from"] != provider_id
+                ):
+                    mode_name = (
+                        "正向顺延" if route_info["mode"] == "forward" else "反选模式"
+                    )
+                    model_part = f"{route_info['from']} → {provider_id}({mode_name})"
                 logger.info(
-                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} 模型 {provider_id} "
+                    f"Token路由[DEBUG]: UMO {umo}{persona_tag} {model_part} "
                     f"用量 {before} → {after} (+{usage}){scope_tag}"
                 )
 
@@ -1080,11 +1083,6 @@ class TokenRouterPlugin(Star):
                         f"{'(全局)' if self.stats_mode == 'global' else ''}，"
                         f"下次请求将自动切换到 {next_provider_id}"
                     )
-                    if self.debug:
-                        logger.info(
-                            f"Token路由[DEBUG]: UMO {umo}{persona_tag} 模型切换 "
-                            f"{provider_id} → {next_provider_id}"
-                        )
             else:
                 # 所有模型已用尽，标记为耗尽状态
                 self._set_all_exhausted(umo, persona_id)
