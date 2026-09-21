@@ -39,6 +39,7 @@ from astrbot.api.message_components import Image, Reply
 from astrbot.api.star import Context, Star, register
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import LLMResponse, ProviderType
+from astrbot.core.provider.provider import Provider
 from astrbot.core.star.star_tools import StarTools
 from sqlalchemy import func, select
 from sqlmodel import col
@@ -74,11 +75,26 @@ def _resolve_usage_day_start(
     return start
 
 
+def _config_supports_modality(config, modality: str) -> bool:
+    """判断 provider 配置是否声明支持某模态。
+
+    与框架口径一致（astr_main_agent.py:_provider_supports_modality）：
+    modalities 未配置（None / 空列表 / 非列表）或查不到配置时一律视为支持，
+    以免插件的判断与框架产生分歧。
+    """
+    if not isinstance(config, dict):
+        return True
+    modalities = config.get("modalities", None)
+    if not isinstance(modalities, list) or not modalities:
+        return True
+    return modality in modalities
+
+
 @register(
     "astrbot_plugin_token_router",
     "Inoryu7z",
     "按对话窗口追踪token用量，达到每日限额后自动路由到下一个模型，所有模型用尽后回退框架默认模型，每日定时自动重置（重置时间可配置）。支持基于人格的独立路由与多模态跳过。提供 /路由 命令按窗口开关插件介入。",
-    "1.5.0",
+    "1.5.1",
     "https://github.com/Inoryu7z/-astrbot_plugin_token_router",
 )
 class TokenRouterPlugin(Star):
@@ -613,6 +629,112 @@ class TokenRouterPlugin(Star):
         )
         return last
 
+    # ========== 跨插件接口：让进行中的会话换用能看图的模型 ==========
+
+    def _get_active_runner(self, umo: str):
+        """获取该窗口当前进行中的 agent runner。
+
+        框架把运行中的 runner 记在模块级注册表里（follow_up.py 的
+        _ACTIVE_AGENT_RUNNERS），该结构属框架内部实现、无公开 API 保证，
+        因此全部调用均需 try/except：取不到就静默放弃切换，退化为不介入。
+        """
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                _ACTIVE_AGENT_RUNNERS,
+            )
+
+            return _ACTIVE_AGENT_RUNNERS.get(umo)
+        except Exception:
+            return None
+
+    async def ensure_vision_provider(
+        self, umo: str, event: AstrMessageEvent | None = None
+    ) -> str:
+        """把进行中的 agent run 换到支持图片输入的模型（供跨插件调用）。
+
+        框架只在「当前 provider 支持 image」时，才把工具返回的图片追加进
+        上下文让 LLM 看到（tool_loop_agent_runner.py:1052-1088）。而图片是
+        agent run 中途由工具产生的，此刻 provider 早已在 on_message 中选定
+        ——若选中的是不支持图片的模型，图片会被直接丢弃，LLM 看不到图。
+
+        生图类插件在把图片回传给 LLM 之前调用本方法，插件会把该 run 的
+        provider 换成「支持图片 + 支持工具调用 + 当日未达限额」的模型；
+        框架随后处理工具返回的图片时就会把它追加进上下文。
+
+        Args:
+            umo: 对话窗口 UMO。
+            event: 可选。提供时用于按人格精确匹配窗口，并把 selected_provider
+                   同步为新模型，使本次 run 的用量记到实际使用的模型上。
+
+        Returns:
+            当前实际使用的 provider_id（已切换则为新模型；未切换则为原模型）；
+            取不到进行中的 run 时返回空字符串。任何异常都被吞掉，不影响调用方。
+        """
+        try:
+            runner = self._get_active_runner(umo)
+            if runner is None:
+                return ""
+
+            current_provider = getattr(runner, "provider", None)
+            current_config = getattr(current_provider, "provider_config", None)
+            current_id = (
+                current_config.get("id", "") if isinstance(current_config, dict) else ""
+            )
+
+            # 当前模型已能看图，无需切换
+            if _config_supports_modality(current_config, "image"):
+                return current_id
+
+            persona_id = None
+            if event is not None:
+                persona_id = await self._get_current_persona_id(event)
+
+            window_config = self._find_window_config(umo, persona_id)
+            models = window_config.get("models", []) if window_config else []
+            if not models:
+                return current_id
+
+            # 按链序找第一个「能看图 + 能用工具 + 当日有额度」的模型
+            target_id = ""
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                pid = model.get("provider_id", "")
+                if not pid:
+                    continue
+                if not self._provider_supports_image(pid):
+                    continue
+                # 运行时换模型必须保留工具能力，否则后续迭代的工具调用会异常
+                if not self._provider_supports_tool_use(pid):
+                    continue
+                daily_limit = model.get("daily_limit", 200000)
+                if self._get_today_usage(umo, persona_id, pid) < daily_limit:
+                    target_id = pid
+                    break
+
+            if not target_id or target_id == current_id:
+                return current_id
+
+            new_provider = self.context.get_provider_by_id(target_id)
+            if not isinstance(new_provider, Provider):
+                return current_id
+
+            # 框架自身在失败重试时也会这样替换 runner 的 provider
+            # （tool_loop_agent_runner.py:553-564），属既有模式
+            runner.provider = new_provider
+            if event is not None:
+                event.set_extra("selected_provider", target_id)
+
+            logger.info(
+                f"Token路由: UMO {umo} 本次会话切换为多模态模型 {target_id}"
+                f"（供工具返回的图片查看，原 {current_id or '未知'}）"
+            )
+            return target_id
+        except Exception as e:
+            # 切换失败一律静默放弃，退化为"图片仍看不到"，绝不打断调用方
+            logger.debug(f"Token路由: 切换多模态模型失败(按原模型继续): {e}")
+            return ""
+
     # ========== 配置查找 ==========
 
     def _find_window_config(self, umo: str, persona_id: str | None, allow_fallback: bool = True) -> dict | None:
@@ -670,37 +792,43 @@ class TokenRouterPlugin(Star):
 
     # ========== 多模态顺延（v1.5.0） ==========
 
-    def _provider_supports_image(self, provider_id: str) -> bool:
-        """判断 provider 是否支持图片输入。
+    def _get_provider_config(self, provider_id: str) -> dict | None:
+        """取 provider 配置，取不到返回 None。
 
-        口径与框架对齐（astr_main_agent.py:_provider_supports_modality）：
-        读取 provider 配置的 modalities 列表，含 "image" 即视为多模态。
-        modalities 未配置（None/空列表）或查不到该 provider 配置时视为支持，
-        以免插件的模态判断与框架（未配置=支持全部模态）产生分歧。
+        优先读实时配置（merged=True 才含 provider_source 层级的 modalities），
+        失败时回退到 provider 实例上的配置（框架自身读 modalities 的方式）。
         """
         if not provider_id:
-            return True
-        config = None
+            return None
         try:
-            # 优先读实时配置（merged=True 才含 provider_source 层级的 modalities）
             config = self.context.provider_manager.get_provider_config_by_id(
                 provider_id, merged=True
             )
+            if isinstance(config, dict):
+                return config
         except Exception:
-            config = None
-        if not isinstance(config, dict):
-            # 回退到 provider 实例上的配置（框架自身读 modalities 的方式）
-            try:
-                provider = self.context.get_provider_by_id(provider_id)
-                config = getattr(provider, "provider_config", None)
-            except Exception:
-                config = None
-        if not isinstance(config, dict):
-            return True
-        modalities = config.get("modalities", None)
-        if not isinstance(modalities, list) or not modalities:
-            return True
-        return "image" in modalities
+            pass
+        try:
+            provider = self.context.get_provider_by_id(provider_id)
+            config = getattr(provider, "provider_config", None)
+            if isinstance(config, dict):
+                return config
+        except Exception:
+            pass
+        return None
+
+    def _provider_supports_image(self, provider_id: str) -> bool:
+        """判断 provider 是否支持图片输入。"""
+        return _config_supports_modality(self._get_provider_config(provider_id), "image")
+
+    def _provider_supports_tool_use(self, provider_id: str) -> bool:
+        """判断 provider 是否支持工具调用。
+
+        运行时切换模型时必须保留工具能力，否则后续 agent 迭代的工具调用会异常。
+        """
+        return _config_supports_modality(
+            self._get_provider_config(provider_id), "tool_use"
+        )
 
     def _model_supports_image(self, model) -> bool:
         """判断路由链中的模型条目是否支持图片输入。"""
